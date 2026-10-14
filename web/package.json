@@ -1,0 +1,22 @@
+{
+  "name": "city-life-agent-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@ai-sdk/vue": "latest",
+    "ai": "latest",
+    "echarts": "^6.1.0",
+    "marked": "^18.1.1",
+    "vue": "latest"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "latest",
+    "vite": "latest"
+  }
+}

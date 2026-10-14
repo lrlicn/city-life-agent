@@ -27,6 +27,12 @@ city-life-agent/
 │   ├── rag_build.py       # 建库：解析 → 切块 → 嵌入 → 入库（Qdrant 本地）
 │   ├── tools.py           # 自定义工具：compute_salary 到手工资计算器
 │   └── agent_runner.py    # Agent：RAGMiddleware(agentic) + 工具 + 流式输出
+├── api/
+│   ├── server.py          # 后端：/chat(自定义SSE) + /chat-ai(AI SDK 5 SSE)
+│   └── static/            # 验证版单轮问答页
+├── web/                   # 前端工程：Vue3 + Vite + Vercel AI SDK
+│   ├── vite.config.js     # /chat-ai 代理到后端 8000
+│   └── src/components/    # ChatView(对话) + SalaryChart(图表)
 ├── .env                   # 密钥配置（勿提交）
 ├── .env.example           # 配置模板
 ├── requirements.txt
@@ -39,6 +45,7 @@ city-life-agent/
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
+使用清华镜像源：pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 # 若 QdrantStore 报缺依赖，补装：pip install qdrant-client
 
 # 2. 配置：复制 .env.example 为 .env，填 DASHSCOPE_API_KEY；CITY 选目标城市
@@ -111,3 +118,15 @@ python scripts/main.py --ask "北京月薪3万到手多少？写份报告"   # �
 - [x] 个税算法修复（月度三档速算）
 - [x] Phase 2：检索引用规范（L2 防幻觉：只依据资料/标注来源/矛盾说明差异，已验证生效）
 - [x] Phase 3：个税升级（基数上下限/专项扣除/估算区间）
+- [x] 前端工程化：Vue3 + Vite + Vercel AI SDK（useChat 流式 + 工具卡片 + Markdown 渲染）
+- [x] 生成式 UI：compute_salary 结果以 `data-salary` part 下发，前端 ECharts 画到手构成图
+- [x] 工具调用可展开卡片（点击查看输入参数 / 返回结果）
+
+## 后续计划（To-Do，尚未实施）
+- [ ] **多轮对话记忆**：当前 `/chat`、`/chat-ai` 均为单轮，Agent 记不住上文；需前端累积 messages、后端维护会话历史后回喂模型
+- [ ] **Human-in-the-loop 审批弹窗**：后端已有 `RequireUserConfirmEvent` 权限机制，但目前 `BYPASS` 放行；需在 AI SDK 流中接入 `tool-approval-request` part，前端渲染"允许 / 拒绝"弹窗（生产安全关键）
+- [ ] **会话侧边栏 + 历史持久化**：新建 / 重命名 / 删除会话，localStorage 或后端持久化
+- [ ] **消息操作**：复制、重新生成(regenerate)、编辑重发、删除单条
+- [ ] **生成式 UI 深化**：当前仅 `data-salary` 图表；可扩展为让模型返回任意结构化数据驱动自定义组件
+- [ ] **流式节流(throttle)**：更平滑的逐字输出
+- [ ] **主题切换 / 响应式**：浅色模式 + 移动端适配
