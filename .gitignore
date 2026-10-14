@@ -1,0 +1,19 @@
+# 密钥：绝不提交
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# RAG 生成的临时索引
+data/index/
+data/qdrant_data/
+
+# 前端工程（未来 Vue/React）
+node_modules/
+dist/
+
+# IDE 本地配置（不提交）
+.idea/
+.vscode/

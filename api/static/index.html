@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>城市生活计算管家</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: #eef1f5; color: #26303c; height: 100vh; display: flex;
+  }
+  .app { width: 100%; max-width: 860px; margin: 0 auto; display: flex;
+         flex-direction: column; height: 100vh; }
+  header { padding: 18px 24px; border-bottom: 1px solid #d8dee6;
+           background: #fff; }
+  header h1 { font-size: 20px; color: #1f5f8e; }
+  header p { font-size: 13px; color: #7a8794; margin-top: 2px; }
+  .messages { flex: 1; overflow-y: auto; padding: 20px 24px; }
+  .msg { max-width: 78%; padding: 12px 14px; border-radius: 12px;
+         white-space: pre-wrap; word-break: break-word; font-size: 15px;
+         line-height: 1.6; }
+  .msg.user { background: #3b82c4; color: #fff; margin-left: auto; }
+  .msg.agent { background: #fff; border: 1px solid #d8dee6; margin-right: auto; }
+  .msg .tooltag { display: inline-block; background: #eef4fb; color: #1f5f8e;
+    border: 1px solid #bcd4ea; border-radius: 6px; padding: 2px 8px;
+    font-size: 12px; margin: 0 6px 4px 0; }
+  .msg .cursor { display: inline-block; width: 2px; height: 16px;
+    background: #3b82c4; vertical-align: text-bottom; animation: blink .8s infinite; }
+  @keyframes blink { 0%,100% { opacity: 1 } 50% { opacity: 0 } }
+  .placeholder { color: #9aa7b3; text-align: center; margin-top: 60px; font-size: 14px; }
+  .inputbar { display: flex; gap: 10px; padding: 14px 24px 18px;
+    border-top: 1px solid #d8dee6; background: #fff; }
+  .inputbar select { border: 1px solid #c3ccd6; border-radius: 8px; padding: 0 8px;
+    font-size: 14px; color: #26303c; }
+  .inputbar input { flex: 1; border: 1px solid #c3ccd6; border-radius: 8px;
+    padding: 12px 14px; font-size: 15px; outline: none; }
+  .inputbar input:focus { border-color: #3b82c4; }
+  .inputbar button { background: #3b82c4; color: #fff; border: none; border-radius: 8px;
+    padding: 0 22px; font-size: 15px; cursor: pointer; }
+  .inputbar button:disabled { background: #9db8d4; cursor: not-allowed; }
+</style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>城市生活计算管家</h1>
+      <p>Agent + RAG · 政策检索 + 到手工资测算 · 单轮问答（流式）</p>
+    </header>
+    <div id="messages" class="messages">
+      <div class="placeholder">输入问题开始，例如：我在上海月薪 2 万，到手能拿多少？</div>
+    </div>
+    <div class="inputbar">
+      <select id="mode">
+        <option value="">自动（默认 standard）</option>
+        <option value="brief">brief 简洁</option>
+        <option value="standard">standard 标准</option>
+        <option value="report">report 报告</option>
+      </select>
+      <input id="question" placeholder="问点什么…">
+      <button id="send">发送</button>
+    </div>
+  </div>
+
+<script>
+  const messagesEl = document.getElementById('messages');
+  const modeSel = document.getElementById('mode');
+  const questionEl = document.getElementById('question');
+  const sendBtn = document.getElementById('send');
+
+  function addMsg(role) {
+    const el = document.createElement('div');
+    el.className = 'msg ' + role;
+    const textEl = document.createElement('div');
+    textEl.className = 'msg-text';
+    el.appendChild(textEl);
+    messagesEl.appendChild(el);
+    return { el, textEl };
+  }
+
+  // 在指定气泡上方/内部追加一段文本
+  function appendText(textEl, delta) {
+    textEl.textContent += delta;
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  // 把 \n\n 拆成 SSE 块，交给处理器
+  async function streamChat(question, mode) {
+    sendBtn.disabled = true;
+    // 清空占位
+    document.querySelector('.placeholder')?.remove();
+    const ai = addMsg('agent');
+    // 工具标签容器
+    const toolWrap = document.createElement('div');
+    ai.el.insertBefore(toolWrap, ai.textEl);
+
+    try {
+      const resp = await fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question, mode: mode || null }),
+      });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      if (!resp.body) throw new Error('响应无流');
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // SSE 块以空行分隔
+        let idx;
+        while ((idx = buffer.indexOf('\n\n')) !== -1) {
+          const chunk = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          const dataLine = chunk.split('\n').find(l => l.startsWith('data: '));
+          if (!dataLine) continue;
+          let evt;
+          try { evt = JSON.parse(dataLine.slice(6)); } catch { continue; }
+          if (evt.type === 'tool') {
+            const tag = document.createElement('span');
+            tag.className = 'tooltag';
+            tag.textContent = '[调用工具] ' + evt.name;
+            toolWrap.appendChild(tag);
+          } else if (evt.type === 'text') {
+            appendText(ai.textEl, evt.delta);
+          } else if (evt.type === 'error') {
+            appendText(ai.textEl, '\n[后端错误] ' + evt.msg);
+          } else if (evt.type === 'done') {
+            break;
+          }
+        }
+      }
+    } catch (err) {
+      appendText(ai.textEl, '\n[请求失败] ' + err.message);
+    } finally {
+      sendBtn.disabled = false;
+    }
+  }
+
+  function send() {
+    const q = questionEl.value.trim();
+    if (!q) return;
+    addMsg('user').textEl.textContent = q;
+    questionEl.value = '';
+    streamChat(q, modeSel.value);
+  }
+
+  sendBtn.addEventListener('click', send);
+  questionEl.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+</script>
+</body>
+</html>

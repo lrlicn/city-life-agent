@@ -1,0 +1,8 @@
+# AgentScope 2.0（Agent / ReAct 工具调用 / RAG）
+agentscope
+# 读取 .env 配置
+python-dotenv
+# OpenAI 兼容接口
+openai
+# AgentScope RAG 的 Qdrant 向量库客户端
+qdrant-client
