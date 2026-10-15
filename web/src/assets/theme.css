@@ -1,0 +1,155 @@
+/* 全局主题变量：深色为默认（:root），浅色由 [data-theme="light"] 覆盖。
+ * "跟随系统"由 ThemeToggle 用 JS 把系统偏好解析成 light/dark 后应用，
+ * 因此这里只需深/浅两套，无需 media query。
+ */
+
+:root {
+  /* 背景 */
+  --bg-base: #0c1220;
+  --bg-grad-end: #121a2e;
+  --glow: rgba(37, 99, 235, 0.16);
+  --glow2: rgba(56, 189, 248, 0.10);
+
+  /* 面板 */
+  --panel: #16223a;
+  --panel-trans: rgba(22, 34, 58, 0.85);
+  --panel-soft: #0e1728;
+  --panel-soft-trans: rgba(14, 23, 40, 0.7);
+  --panel-deep: #101a2d;
+  --panel-hover: #1d2b47;
+  --panel-hover2: #111c31;
+  --panel-th: #1d2b47;
+  --panel-zebra: #182440;
+  --panel-code: #0e1728;
+
+  /* 边框 */
+  --border: #22304a;
+  --border-strong: #2a3a55;
+  --border-line: #1c2a42;
+  --border-soft: rgba(42, 58, 85, 0.5);
+
+  /* 文字 */
+  --text: #e5eaf1;
+  --text-strong: #f1f5fb;
+  --text-stronger: #f4f7fc;
+  --text-2: #c4d4ec;
+  --text-3: #9fb4d4;
+  --text-dim: #8aa0bd;
+  --text-faint: #5f7aa0;
+  --text-muted: #93a7c4;
+  --text-link: #60a5fa;
+  --text-on-accent: #dbeafe;
+
+  /* 强调 / 状态 */
+  --accent: #2563eb;
+  --accent2: #38bdf8;
+  --accent-deep: #1d4ed8;
+  --accent-glow: rgba(37, 99, 235, 0.4);
+  --accent-ring: rgba(59, 130, 196, 0.15);
+  --accent-soft: rgba(59, 130, 196, 0.6);
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --err: #f87171;
+  --err-bg: #45181b;
+  --err-text: #fca5a5;
+  --err-border: #5b2a2e;
+  --danger: #7f1d1d;
+
+  /* 消息区底部渐隐 */
+  --fade: rgba(12, 18, 32, 0.85);
+}
+
+:root[data-theme="light"] {
+  /* 背景 */
+  --bg-base: #f5f6f8;
+  --bg-grad-end: #eceef2;
+  --glow: rgba(37, 99, 235, 0.08);
+  --glow2: rgba(56, 189, 248, 0.06);
+
+  /* 面板 */
+  --panel: #ffffff;
+  --panel-trans: rgba(255, 255, 255, 0.92);
+  --panel-soft: #f3f6fb;
+  --panel-soft-trans: rgba(243, 246, 251, 0.85);
+  --panel-deep: #e9eef6;
+  --panel-hover: #edf2fb;
+  --panel-hover2: #e9eef6;
+  --panel-th: #eef3fb;
+  --panel-zebra: #f7f9fd;
+  --panel-code: #f0f4fa;
+
+  /* 边框 */
+  --border: #d5dce9;
+  --border-strong: #c3cce0;
+  --border-line: #e0e6f0;
+  --border-soft: rgba(195, 204, 224, 0.7);
+
+  /* 文字 */
+  --text: #1c2733;
+  --text-strong: #0f1a26;
+  --text-stronger: #0b1622;
+  --text-2: #334155;
+  --text-3: #475569;
+  --text-dim: #64748b;
+  --text-faint: #94a3b8;
+  --text-muted: #5b6b84;
+  --text-link: #2563eb;
+  --text-on-accent: #eff6ff;
+
+  /* 强调 / 状态 */
+  --accent: #2563eb;
+  --accent2: #0ea5e9;
+  --accent-deep: #1d4ed8;
+  --accent-glow: rgba(37, 99, 235, 0.25);
+  --accent-ring: rgba(37, 99, 235, 0.18);
+  --accent-soft: rgba(37, 99, 235, 0.5);
+  --ok: #059669;
+  --warn: #d97706;
+  --err: #dc2626;
+  --err-bg: #fde8e8;
+  --err-text: #b91c1c;
+  --err-border: #f5c2c2;
+  --danger: #b91c1c;
+
+  /* 消息区底部渐隐 */
+  --fade: rgba(238, 242, 248, 0.85);
+}
+
+/* 背景与文字过渡，主题切换更平滑 */
+html {
+  transition: background-color 0.2s ease;
+}
+body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--bg-base);
+  transition: background-color 0.2s ease;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* 全局 tooltip：按钮加 data-tip="提示文字" 即可 */
+[data-tip] { position: relative; }
+[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%) translateY(2px);
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: #1a1a1a;
+  color: #fff;
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .15s, transform .15s;
+  z-index: 200;
+}
+[data-tip]:hover::after {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}

@@ -91,3 +91,62 @@ def compute_salary(
         f"  口径：到手=月薪−社保−公积金−个税；个税起征点 {p['threshold']:.0f}/月；"
         f"未计累计预扣法与年终奖；以上为演示参数，以官方为准。"
     )
+
+
+# 租房演示惯例（非官方，仅教学用）：
+#   agency_default_rate = 中介费默认占月租金比例（上海常见约半月租金）
+#   deposit_default_months = 常见押付月数
+RENT_DEFAULTS = {
+    "上海": {"agency_default_rate": 0.5, "deposit_default_months": 1.0},
+    "北京": {"agency_default_rate": 1.0, "deposit_default_months": 1.0},
+    "深圳": {"agency_default_rate": 0.5, "deposit_default_months": 1.0},
+    "广州": {"agency_default_rate": 0.5, "deposit_default_months": 1.0},
+}
+
+
+def compute_rent(
+    city: str,
+    monthly_rent: float,
+    deposit_months: float | None = None,
+    agency_fee_rate: float | None = None,
+    property_fee: float = 0.0,
+    utility: float = 0.0,
+    months: int = 12,
+) -> str:
+    """计算某城市租房的成本构成（押金 / 中介费 / 首月支出 / 月均 / 年总）。
+
+    输出固定格式文本，便于后端正则提取结构化数据供前端画图（同 compute_salary 模式）。
+
+    Args:
+        city: 城市名，如 "上海"、"北京"。
+        monthly_rent: 月租金（元/月）。
+        deposit_months: 押金月数；缺省按城市惯例。
+        agency_fee_rate: 中介费率（占月租金）；缺省按城市惯例。
+        property_fee: 物业费/月（元），默认 0。
+        utility: 水电网/月（元），默认 0。
+        months: 租期（月），默认 12。
+    """
+    if city not in RENT_DEFAULTS:
+        return f"暂不支持城市：{city} 的租房测算"
+
+    d = RENT_DEFAULTS[city]
+    if deposit_months is None:
+        deposit_months = d["deposit_default_months"]
+    if agency_fee_rate is None:
+        agency_fee_rate = d["agency_default_rate"]
+
+    deposit = monthly_rent * deposit_months          # 押金（可退）
+    agency = monthly_rent * agency_fee_rate          # 中介费（一次性，不退）
+    first_month = monthly_rent + deposit + agency + property_fee + utility  # 首月现金支出
+    monthly_recurring = monthly_rent + property_fee + utility              # 月均持续成本
+    year_total = monthly_recurring * months + agency                        # 年总成本（押金可退不计入）
+
+    return (
+        f"{city}租房成本测算（月租金 {monthly_rent:.0f} 元）：\n"
+        f"  押金 ≈ {deposit:.0f} 元（{deposit_months:g} 个月，退租可退）\n"
+        f"  中介费 ≈ {agency:.0f} 元（{agency_fee_rate*100:.0f}% 月租金，一次性）\n"
+        f"  首月一次性支出 ≈ {first_month:.0f} 元（押金+中介费+首月租金+物业水电）\n"
+        f"  月均生活成本 ≈ {monthly_recurring:.0f} 元（租金+物业+水电网）\n"
+        f"  年总成本 ≈ {year_total:.0f} 元（{months} 个月，押金可退不计入）\n"
+        f"  口径：押金/中介费惯例为演示参数，实际以当地房源与中介约定为准。"
+    )

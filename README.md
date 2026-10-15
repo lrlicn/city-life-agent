@@ -32,7 +32,8 @@ city-life-agent/
 │   └── static/            # 验证版单轮问答页
 ├── web/                   # 前端工程：Vue3 + Vite + Vercel AI SDK
 │   ├── vite.config.js     # /chat-ai 代理到后端 8000
-│   └── src/components/    # ChatView(对话) + SalaryChart(图表)
+│   ├── src/assets/theme.css # 全局主题变量（深/浅两档）
+│   └── src/components/    # ChatView(对话) + SalaryChart(图表) + ThemeToggle(主题切换)
 ├── .env                   # 密钥配置（勿提交）
 ├── .env.example           # 配置模板
 ├── requirements.txt
@@ -67,7 +68,7 @@ python scripts/main.py --ask "北京月薪3万到手多少？写份报告"   # �
 
 ## 项目功能全景（当前完整能力）
 - **RAG**：解析 → 切块(overlap) → embedding → Qdrant 本地持久化；`agentic` 模式把检索作为工具
-- **ReAct 工具调用**：`compute_salary`（含基数上下限/专项扣除/估算区间）+ `search_knowledge`；`BYPASS` 放行安全工具
+- **ReAct 工具调用**：`compute_salary`（含基数上下限/专项扣除/估算区间）+ `compute_rent`（押金/中介费/首月/月均/年总）+ `search_knowledge`；`BYPASS` 放行安全工具
 - **提示词体系**：L1 系统规则 + L2 检索规范（防幻觉）+ L3 三档回答模式（brief/standard/report），支持命令行 / 自然语言 / 配置三种切换
 - **个税升级**：月度三档速算、缴费基数上下限、专项附加扣除参数化、估算区间 + 口径假设
 - **城市可配置**：改 `.env` 的 CITY + 加语料目录 + 加 CITY_PARAMS，不改代码
@@ -121,12 +122,30 @@ python scripts/main.py --ask "北京月薪3万到手多少？写份报告"   # �
 - [x] 前端工程化：Vue3 + Vite + Vercel AI SDK（useChat 流式 + 工具卡片 + Markdown 渲染）
 - [x] 生成式 UI：compute_salary 结果以 `data-salary` part 下发，前端 ECharts 画到手构成图
 - [x] 工具调用可展开卡片（点击查看输入参数 / 返回结果）
+- [x] 三档主题切换（深色/浅色/跟随系统）：theme.css 全局 CSS 变量 + ThemeToggle 独立组件
+- [x] Phase 2：租房成本工具 compute_rent（押金/中介费/首月一次性/月均/年总）+ 租房语料 + 生成式 UI 租房构成图（RentChart.vue）
+
+## 能力扩展路线（让「城市生活」名副其实）
+首页副标题已放宽为「城市生活的账，帮你算清楚」，贴合产品定位；但后端目前只实现薪资/社保一类工具。
+为保证「承诺 ≤ 能力」，能力需分阶段补齐。每个新能力 = **一条工具 + 一份知识库语料**，不改架构：
+
+| 阶段 | 能力方向 | 工具示例 | 知识库语料 |
+|---|---|---|---|
+| ✅ 已完成 | 薪资 / 社保 / 公积金 | compute_salary | 城市社保与公积金 |
+| ✅ Phase 2 | 租房成本 | compute_rent（租金/押金/中介费/物业水电） | 城市租房成本要点 |
+| Phase 3 | 通勤开销 | compute_commute（地铁/打车/油费） | 城市交通政策/票价 |
+| Phase 4 | 房贷月供 | compute_mortgage（LPR/首付/年限） | 城市限购/贷款政策 |
+| Phase 5 | 生活成本 | compute_cost_index（物价/餐饮） | 城市生活成本数据 |
+| 持续 | 更多城市 | — | data/docs/{CITY}/ 语料 + CITY_PARAMS 扩展 |
+
+**实现要点**：每个工具在 `src/tools.py` 注册 `FunctionTool`，前端自动出工具卡片；结构化结果可加 `data-*` part 复用生成式 UI（参照 `data-salary`）。
 
 ## 后续计划（To-Do，尚未实施）
-- [ ] **多轮对话记忆**：当前 `/chat`、`/chat-ai` 均为单轮，Agent 记不住上文；需前端累积 messages、后端维护会话历史后回喂模型
+- [x] **多轮对话记忆**：`/chat-ai` 接收 conversationId，后端从 SQLite 读历史消息转成 Msg list 回喂 Agent（最近 20 条控 token），支持追问上下文
+- [x] **会话侧边栏 + 历史持久化**：SQLite（data/app.db，WAL）存 conversations/messages，Sidebar.vue 支持新建/切换/重命名/删除，刷新不丢；user_id 列已预留多用户扩展
 - [ ] **Human-in-the-loop 审批弹窗**：后端已有 `RequireUserConfirmEvent` 权限机制，但目前 `BYPASS` 放行；需在 AI SDK 流中接入 `tool-approval-request` part，前端渲染"允许 / 拒绝"弹窗（生产安全关键）
-- [ ] **会话侧边栏 + 历史持久化**：新建 / 重命名 / 删除会话，localStorage 或后端持久化
 - [ ] **消息操作**：复制、重新生成(regenerate)、编辑重发、删除单条
 - [ ] **生成式 UI 深化**：当前仅 `data-salary` 图表；可扩展为让模型返回任意结构化数据驱动自定义组件
 - [ ] **流式节流(throttle)**：更平滑的逐字输出
-- [ ] **主题切换 / 响应式**：浅色模式 + 移动端适配
+- [x] **主题切换三档**：深色/浅色/跟随系统（theme.css 全局 CSS 变量 + ThemeToggle.vue 独立组件）
+- [ ] **移动端响应式适配**

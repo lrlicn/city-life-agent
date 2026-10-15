@@ -1,23 +1,25 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, watch, reactive, onBeforeUnmount, onMounted } from 'vue'
 import { useChat } from '@ai-sdk/vue'
 import { DefaultChatTransport, isToolUIPart, getToolName } from 'ai'
 import { marked } from 'marked'
 import SalaryChart from './SalaryChart.vue'
+import RentChart from './RentChart.vue'
+import ThemeToggle from './ThemeToggle.vue'
+import Sidebar from './Sidebar.vue'
 
-// 回答模式：空 = 后端 .env 的 REPLY_MODE；或 brief / standard / report
-const mode = ref('')
+// 回答模式：brief / standard / report
+const mode = ref('standard')
 const input = ref('')
 const MODES = [
-  { label: '自动', value: '' },
-  { label: '简洁', value: 'brief' },
-  { label: '标准', value: 'standard' },
-  { label: '报告', value: 'report' },
+  { label: '简洁', value: 'brief', desc: '只给结论，快速回答' },
+  { label: '标准', value: 'standard', desc: '结论 + 简要说明' },
+  { label: '详细', value: 'report', desc: '完整报告，含计算过程' },
 ]
 const modeOpen = ref(false)
 function modeLabel(v) {
   const m = MODES.find(x => x.value === v)
-  return m ? m.label : '自动'
+  return m ? m.label : '标准'
 }
 function pickMode(v) {
   mode.value = v
@@ -53,22 +55,99 @@ function fmt(v) {
 const { messages, sendMessage, status, error, stop } = useChat({
   transport: new DefaultChatTransport({
     api: '/chat-ai',
-    body: () => ({ mode: mode.value || null }),
+    body: () => ({
+      mode: mode.value || null,
+      // 临时会话 id 不传给后端，让后端创建真正的会话
+      conversationId: convId.value && !convId.value.startsWith('temp-') ? convId.value : null,
+    }),
   }),
+  onFinish: async () => {
+    // 新建会话首次发消息后，后端自动建了会话，刷新列表拿到 id
+    await loadConvs()
+    // 如果当前是临时会话 id，替换成后端真正的会话 id
+    if (convId.value.startsWith('temp-') && conversations.value.length > 0) {
+      convId.value = conversations.value[0].id
+      localStorage.setItem('convId', convId.value)
+    }
+  },
+})
+
+// ---- 会话管理（SQLite 持久化）----
+const convId = ref(localStorage.getItem('convId') || '')
+const sidebarOpen = ref(true)
+const conversations = ref([])
+
+async function loadConvs() {
+  try {
+    const r = await fetch('/api/conversations')
+    conversations.value = await r.json()
+  } catch { conversations.value = [] }
+}
+async function newConv() {
+  // 只清空前端视图，不立即创建 DB 记录；发第一条消息时后端自动建会话
+  convId.value = ''
+  localStorage.removeItem('convId')
+  messages.value = []
+  // 不调 loadConvs()，避免异步覆盖掉 submit() 里插入的临时会话项
+}
+async function selectConv(id) {
+  convId.value = id
+  localStorage.setItem('convId', id)
+  const r = await fetch(`/api/conversations/${id}/messages`)
+  const msgs = await r.json()
+  messages.value = msgs.map(m => ({ id: m.id, role: m.role, parts: m.parts }))
+}
+async function renameConv({ id, title }) {
+  await fetch(`/api/conversations/${id}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title }),
+  })
+  loadConvs()
+}
+async function deleteConv(id) {
+  try {
+    const r = await fetch(`/api/conversations/${id}`, { method: 'DELETE' })
+    if (!r.ok) console.error('delete failed:', r.status)
+  } catch (e) { console.error('delete error:', e) }
+  if (convId.value === id) {
+    convId.value = ''
+    localStorage.removeItem('convId')
+    messages.value = []
+  }
+  await loadConvs()
+}
+onMounted(() => {
+  loadConvs()
+  // 上次未关闭的会话，自动载入历史
+  if (convId.value) selectConv(convId.value)
 })
 
 const PRESETS = [
-  { icon: '💼', text: '上海月薪 2 万，到手能拿多少？' },
-  { icon: '🏦', text: '上海社保公积金怎么缴？' },
-  { icon: '📊', text: '深圳月薪 3 万，到手能拿多少？' },
-  { icon: '📄', text: '帮我把测算结果整理成一份报告' },
+  { icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/><path d="M3 7V5a2 2 0 0 1 2-2h11"/><circle cx="15" cy="13.5" r="1.3"/></svg>', text: '上海月薪 2 万，到手能拿多少？' },
+  { icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10 12 3l9 7"/><path d="M5 10v8M9.5 10v8M14.5 10v8M19 10v8"/><path d="M3 21h18"/></svg>', text: '上海社保公积金怎么缴？' },
+  { icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-8 9 8"/><path d="M5 9.5V20h14V9.5"/><path d="M10 20v-5h4v5"/></svg>', text: '上海月租 5000，租房要准备多少钱？' },
+  { icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/><path d="M10 13h6M10 17h6"/></svg>', text: '帮我把测算结果整理成一份报告' },
 ]
 
 function submit(text) {
   const q = (text ?? input.value).trim()
   if (!q) return
+
+  // 新建会话时，先在侧边栏插入临时会话项，让用户立刻看到标题 + loading
+  if (!convId.value) {
+    const tempId = 'temp-' + Date.now()
+    const tempTitle = q.length > 20 ? q.slice(0, 20) + '…' : q
+    conversations.value.unshift({
+      id: tempId,
+      title: tempTitle,
+      updated_at: Date.now() / 1000,
+    })
+    convId.value = tempId
+    localStorage.setItem('convId', tempId)
+  }
+
   sendMessage({ text: q })
   input.value = ''
+  scrollToBottom(true)
 }
 
 // 多行输入框自动增高（上限 140px）
@@ -78,9 +157,38 @@ function autoGrow(e) {
   t.style.height = Math.min(t.scrollHeight, 140) + 'px'
 }
 
+// 渲染前清理 markdown 源：把段落间的连续空行压缩成单个（使排版紧凑），
+// 但完整保护 fenced code 块（``` 内部原样），不破坏列表 / 表格结构。
+function cleanMd(src) {
+  const lines = (src || '').split('\n')
+  let inCode = false
+  let blank = 0
+  const out = []
+  for (const line of lines) {
+    if (/^```/.test(line)) {
+      inCode = !inCode
+      blank = 0
+      out.push(line)
+      continue
+    }
+    if (inCode) {
+      out.push(line)
+      continue
+    }
+    if (line.trim() === '') {
+      blank++
+      if (blank <= 1) out.push('')
+      continue
+    }
+    blank = 0
+    out.push(line)
+  }
+  return out.join('\n')
+}
+
 // Markdown → HTML 渲染（Agent 回答里的表格/标题/加粗）
 function md(src) {
-  return marked.parse(src || '')
+  return marked.parse(cleanMd(src))
 }
 
 function userText(m) {
@@ -96,7 +204,22 @@ function agentParts(m) {
   return (m.parts || [])
     .map((p, i) => {
       if (p.type === 'text') return { key: i, kind: 'text', text: p.text || '' }
+      if (p.type === 'reasoning') return { key: i, kind: 'reasoning', text: p.text || '' }
       if (p.type === 'data-salary') return { key: i, kind: 'chart', data: p.data }
+      if (p.type === 'data-rent') return { key: i, kind: 'chart', data: p.data }
+      // 后端落库的 tool part 结构
+      if (p.type === 'tool') {
+        return {
+          key: i,
+          kind: 'tool',
+          name: p.name || '',
+          running: false,
+          input: p.input,
+          output: p.output,
+          done: true,
+        }
+      }
+      // AI SDK 流式输出的 tool UI part
       if (isToolUIPart(p)) {
         return {
           key: i,
@@ -113,14 +236,64 @@ function agentParts(m) {
     .filter(Boolean)
 }
 
+// 把连续的 text 段合并成一段，避免流式分段导致 markdown 解析不完整
+function groupedParts(m) {
+  const parts = agentParts(m)
+  const result = []
+  let textBuffer = []
+  let textStartKey = 0
+  // chart 去重：相同城市+薪资的图表只保留最后一个
+  const chartSeen = new Map()
+
+  // 先收集所有 chart 的位置，标记需要去重的
+  parts.forEach((p, idx) => {
+    if (p.kind === 'chart') {
+      const k = p.data?.monthly_salary != null
+        ? `${p.data.city || ''}-s-${p.data.monthly_salary}`
+        : p.data?.monthly_rent != null
+          ? `${p.data.city || ''}-r-${p.data.monthly_rent}`
+          : `c-${idx}`
+      chartSeen.set(k, idx) // 记录最后出现的位置
+    }
+  })
+
+  for (const p of parts) {
+    if (p.kind === 'text') {
+      if (textBuffer.length === 0) textStartKey = p.key
+      textBuffer.push(p.text)
+    } else {
+      if (textBuffer.length > 0) {
+        result.push({ key: 'text-' + textStartKey, kind: 'text', text: textBuffer.join('') })
+        textBuffer = []
+      }
+      // chart 去重：如果不是最后一个相同 key 的 chart，跳过
+      if (p.kind === 'chart') {
+        const k = p.data?.monthly_salary != null
+          ? `${p.data.city || ''}-s-${p.data.monthly_salary}`
+          : p.data?.monthly_rent != null
+            ? `${p.data.city || ''}-r-${p.data.monthly_rent}`
+            : `c-${parts.indexOf(p)}`
+        if (chartSeen.get(k) !== parts.indexOf(p)) continue // 不是最后一个，跳过
+      }
+      result.push(p)
+    }
+  }
+  if (textBuffer.length > 0) {
+    result.push({ key: 'text-' + textStartKey, kind: 'text', text: textBuffer.join('') })
+  }
+  return result
+}
+
 // 图表去重：相同城市 + 相同月薪只保留第一张
 function uniqueCharts(m) {
   const seen = new Set()
   return agentParts(m).filter(x => x.kind === 'chart').filter(x => {
     const k =
-      x.data.city && x.data.monthly_salary != null
-        ? `${x.data.city}-${x.data.monthly_salary}`
-        : `c-${x.key}`
+      x.data.monthly_salary != null
+        ? `${x.data.city || ''}-s-${x.data.monthly_salary}`
+        : x.data.monthly_rent != null
+          ? `${x.data.city || ''}-r-${x.data.monthly_rent}`
+          : `c-${x.key}`
     if (seen.has(k)) return false
     seen.add(k)
     return true
@@ -131,11 +304,6 @@ function toolsOf(m) {
   return agentParts(m).filter(x => x.kind === 'tool')
 }
 
-// 最后一条助手消息仍在上 / 生成中 → 显示活动光标
-function isLastAssistant(m) {
-  return m.role === 'assistant' && m === messages.value[messages.value.length - 1]
-}
-
 const busy = computed(() => status.value === 'streaming' || status.value === 'submitted')
 const statusLabel = computed(() => {
   if (status.value === 'submitted') return '思考中'
@@ -143,34 +311,173 @@ const statusLabel = computed(() => {
   if (status.value === 'error') return '出错'
   return '就绪'
 })
-const statusTone = computed(() => {
-  if (status.value === 'streaming' || status.value === 'submitted') return 'busy'
+const statusTone = computed(() => {  if (status.value === 'streaming' || status.value === 'submitted') return 'busy'
   if (status.value === 'error') return 'err'
   return 'idle'
 })
+
+// 当前会话标题：从侧边栏列表里找，找不到就用第一条用户消息前 20 字
+const currentTitle = computed(() => {
+  const cv = conversations.value.find(c => c.id === convId.value)
+  if (cv) return cv.title
+  // 新建会话还没建 DB 记录时，用第一条用户消息当标题
+  const firstUser = messages.value.find(m => m.role === 'user')
+  if (firstUser) return userText(firstUser).slice(0, 20)
+  return '新会话'
+})
+
+// 最后一条助手消息（可能还在生成）
+const lastAssistant = computed(() => {
+  const ms = messages.value
+  for (let i = ms.length - 1; i >= 0; i--) {
+    if (ms[i].role === 'assistant') return ms[i]
+  }
+  return null
+})
+// 是否已产出任何内容（文本 / 工具过程）
+function hasOutput(m) {
+  if (!m) return false
+  return agentParts(m).some(x => (x.kind === 'text' && x.text) || x.kind === 'reasoning') || toolsOf(m).length > 0
+}
+
+// 判断是不是当前正在生成的最后一条 assistant 消息
+function isLastAssistantMsg(m) {
+  const msgs = messages.value
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].role === 'assistant') {
+      return msgs[i].id === m.id
+    }
+  }
+  return false
+}
+
+// 历史消息：把所有思考过程和工具调用合并成一个总的折叠面板
+// text 和 chart 保持原始顺序穿插
+function historyParts(m) {
+  const parts = agentParts(m)
+  const processes = parts.filter(p => p.kind === 'reasoning' || p.kind === 'tool')
+  // text 和 chart 保持原始顺序
+  const content = parts.filter(p => p.kind === 'text' || p.kind === 'chart')
+  return { content, processes }
+}
+// 生成中但尚无内容 → 显示「思考中」友好提示
+const showThinking = computed(() => {
+  return busy.value && !hasOutput(lastAssistant.value)
+})
+
+// 消息时间戳与操作
+const msgTimes = reactive({})
+watch(messages, (ms) => {
+  for (const m of ms) {
+    if (m.id && msgTimes[m.id] == null) msgTimes[m.id] = Date.now()
+  }
+}, { deep: true })
+const copiedId = ref(null)
+function fmtTime(ts) {
+  if (!ts) return ''
+  const d = new Date(ts)
+  const now = new Date()
+  const pad = n => String(n).padStart(2, '0')
+  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  const sameDay = d.toDateString() === now.toDateString()
+  const yest = new Date(now)
+  yest.setDate(now.getDate() - 1)
+  if (sameDay) return `今天 ${hm}`
+  if (d.toDateString() === yest.toDateString()) return `昨天 ${hm}`
+  return `${d.getMonth() + 1}/${d.getDate()} ${hm}`
+}
+function msgText(m) {
+  if (m.role === 'user') return userText(m)
+  return agentParts(m).filter(x => x.kind === 'text').map(x => x.text).join('')
+}
+async function copyMsg(m) {
+  const t = msgText(m)
+  if (!t) return
+  try {
+    await navigator.clipboard.writeText(t)
+    copiedId.value = m.id
+    setTimeout(() => { if (copiedId.value === m.id) copiedId.value = null }, 1500)
+  } catch { /* 剪贴板不可用时静默降级 */ }
+}
+function regenerate(m) {
+  const t = userText(m)
+  if (!t || status.value !== 'ready') return
+  sendMessage({ text: t })
+}
+
+// 滚动条：仅滚动时浮现，停止后淡出隐藏
+const msgScrolling = ref(false)
+let scrollTimer = null
+
+// 流式输出时自动滚到底部（仅当用户在底部时）
+const messagesEl = ref(null)
+const isAtBottom = ref(true)
+
+function checkIfAtBottom() {
+  const el = messagesEl.value
+  if (!el) return
+  isAtBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+}
+
+function scrollToBottom(force = false) {
+  requestAnimationFrame(() => {
+    const el = messagesEl.value
+    if (el && (force || isAtBottom.value)) {
+      el.scrollTop = el.scrollHeight
+    }
+  })
+}
+
+function onMsgScroll() {
+  msgScrolling.value = true
+  clearTimeout(scrollTimer)
+  scrollTimer = setTimeout(() => {
+    msgScrolling.value = false
+  }, 900)
+  checkIfAtBottom()
+}
+
+// 深度监听消息内容变化，流式输出时持续滚动
+watch(() => JSON.stringify(messages.value), () => {
+  scrollToBottom()
+})
+
+// 切换会话时强制滚到底部
+watch(() => convId.value, () => scrollToBottom(true))
+onBeforeUnmount(() => clearTimeout(scrollTimer))
 </script>
 
 <template>
   <div class="app" @click="modeOpen = false">
+    <Sidebar
+      :conversations="conversations"
+      :active-id="convId"
+      :open="sidebarOpen"
+      :status-tone="statusTone"
+      :status-label="statusLabel"
+      @close="sidebarOpen = false"
+      @new="newConv"
+      @select="selectConv"
+      @rename="renameConv"
+      @delete="deleteConv"
+    />
     <div class="inner">
-    <!-- 顶栏：只留产品名 + 一个状态点 -->
-    <header>
-      <div class="brand">
-        <div class="logo">◈</div>
-        <h1>城市生活计算管家</h1>
-      </div>
-      <div class="header-status" :class="statusTone">
-        <span class="dot"></span>
-        <span>{{ statusLabel }}</span>
+    <!-- 顶栏：收起时显示汉堡，展开时显示当前会话标题 -->
+    <header class="topbar" :class="{ 'has-title': messages.length > 0 }">
+      <button v-if="!sidebarOpen" class="hamburger" @click.stop="sidebarOpen = true" aria-label="展开侧栏" data-tip="展开侧栏">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="4"/><line x1="14" y1="4" x2="14" y2="20"/></svg>
+      </button>
+      <div v-if="messages.length > 0" class="topbar-title">{{ currentTitle }}
+        <span class="topbar-disclaimer">AI 生成内容可能有误，关键数据请以官方来源为准</span>
       </div>
     </header>
 
     <!-- 消息区 -->
-    <div class="messages">
+    <div ref="messagesEl" class="messages" :class="{ scrolling: msgScrolling }" @scroll="onMsgScroll">
       <!-- 初始态 -->
       <div v-if="messages.length === 0" class="welcome">
-        <div class="w-title">问点什么，我来帮你算</div>
-        <div class="w-sub">社保公积金、到手工资，帮你算清楚</div>
+        <div class="w-title">城市生活的账，帮你算清楚</div>
+        <div class="w-sub">工资到手、社保公积金、租房成本，先从这里问起</div>
         <div class="presets">
           <button
             v-for="p in PRESETS"
@@ -179,7 +486,7 @@ const statusTone = computed(() => {
             @click="submit(p.text)"
             :disabled="status !== 'ready'"
           >
-            <span class="p-icon">{{ p.icon }}</span>
+            <span class="p-icon" v-html="p.icon"></span>
             <span class="p-label">{{ p.text }}</span>
             <span class="p-arrow">→</span>
           </button>
@@ -190,27 +497,64 @@ const statusTone = computed(() => {
       <template v-for="m in messages" :key="m.id">
         <div v-if="m.role === 'user'" class="row user-row">
           <div class="bubble user">{{ userText(m) }}</div>
+          <div class="msg-meta">
+            <span class="m-time">{{ fmtTime(msgTimes[m.id]) }}</span>
+            <span class="m-acts">
+              <button class="m-act" :class="{ ok: copiedId === m.id }" @click="copyMsg(m)" data-tip="复制">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+              </button>
+              <button class="m-act" @click="regenerate(m)" data-tip="重新生成">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
+              </button>
+            </span>
+          </div>
         </div>
 
         <div v-else class="row agent-row">
           <div class="avatar a">◈</div>
           <div class="agent-body">
-            <!-- 工具过程：默认折叠成一条 -->
-            <div v-if="toolsOf(m).length" class="process">
-              <div class="process-head" @click="toggleMsg(m.id)">
-                <span class="p-icon">⚙</span>
-                <span class="p-text">
-                  {{ toolsOf(m).some(t => t.running) ? '正在调用工具…' : `已调用工具 ${toolsOf(m).length} 次` }}
-                </span>
-                <span class="p-toggle">{{ openMsgs.has(m.id) ? '▴' : '▾' }}</span>
-              </div>
-              <div v-if="openMsgs.has(m.id)" class="process-list">
-                <div v-for="p in toolsOf(m)" :key="p.key" class="tool-item">
-                  <div class="tool-head" @click="toggleTool(p.key)">
-                    <span class="ti-name">{{ p.name }}</span>
+            <!-- 思考中占位：尚未产出任何内容时的友好提示 -->
+            <div v-if="showThinking" class="thinking">让我算一算<span class="dots"><i></i><i></i><i></i></span></div>
+
+            <!-- 当前正在生成的消息：穿插式展示 -->
+            <template v-if="isLastAssistantMsg(m) && status === 'streaming'">
+              <template v-for="p in groupedParts(m)" :key="p.key">
+                <!-- 思考过程：生成中展开 -->
+                <div v-if="p.kind === 'reasoning'" class="reasoning">
+                  <details :open="true">
+                    <summary>
+                      <span class="r-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                          <path d="M9 18h6"/>
+                          <path d="M10 22h4"/>
+                          <path d="M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.4 1 2.3h6c0-.9.4-1.8 1-2.3A7 7 0 0 0 12 2z"/>
+                        </svg>
+                      </span>
+                      <span class="r-label">思考过程</span>
+                      <span class="r-toggle">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                          <path d="M9 18l6-6-6-6"/>
+                        </svg>
+                      </span>
+                    </summary>
+                    <div class="r-body">{{ p.text }}</div>
+                  </details>
+                </div>
+
+                <!-- 工具调用：每个单独一行 -->
+                <div v-else-if="p.kind === 'tool'" class="process">
+                  <div class="process-head" @click="toggleTool(p.key)">
+                    <span class="p-icon">⚙</span>
+                    <span class="p-text">
+                      {{ p.running ? '正在调用工具…' : p.name }}
+                    </span>
                     <span v-if="p.running" class="ti-state run">进行中…</span>
                     <span v-else class="ti-state ok">完成</span>
-                    <span v-if="p.done" class="ti-toggle">{{ expanded.has(p.key) ? '▴' : '▾' }}</span>
+                    <span v-if="p.done" class="p-toggle chev" :class="{ open: expanded.has(p.key) }">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M9 18l6-6-6-6"/>
+                      </svg>
+                    </span>
                   </div>
                   <div v-if="expanded.has(p.key)" class="tool-detail">
                     <div v-if="p.input && Object.keys(p.input).length" class="td">
@@ -223,27 +567,89 @@ const statusTone = computed(() => {
                     </div>
                   </div>
                 </div>
-              </div>
-            </div>
 
-            <!-- 图表（去重后） -->
-            <div v-for="p in uniqueCharts(m)" :key="p.key" class="chart-wrap">
-              <SalaryChart :data="p.data" />
-            </div>
+                <!-- 图表 -->
+                <div v-else-if="p.kind === 'chart'" class="chart-wrap">
+                  <SalaryChart v-if="p.data && p.data.net != null" :data="p.data" />
+                  <RentChart v-else-if="p.data && p.data.total != null" :data="p.data" />
+                </div>
 
-            <!-- 回答文本 -->
-            <div class="bubble agent">
-              <template v-for="p in agentParts(m).filter(x => x.kind === 'text')" :key="p.key">
-                <div class="text markdown" v-html="md(p.text)"></div>
+                <!-- 文本回复 -->
+                <div v-else-if="p.kind === 'text'" class="markdown" v-html="md(p.text)"></div>
               </template>
-              <span v-if="isLastAssistant(m) && busy" class="cursor"></span>
-            </div>
+            </template>
+
+            <!-- 历史消息：思考过程折叠面板在最上面，然后分隔线，然后是最终回复 -->
+            <template v-else>
+              <!-- 总的思考过程折叠面板（在最上面） -->
+              <details v-if="historyParts(m).processes.length > 0" class="reasoning history-reasoning">
+                <summary>
+                  <span class="r-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M9 18h6"/>
+                      <path d="M10 22h4"/>
+                      <path d="M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.4 1 2.3h6c0-.9.4-1.8 1-2.3A7 7 0 0 0 12 2z"/>
+                    </svg>
+                  </span>
+                  <span class="r-label">思考过程</span>
+                  <span class="r-count">{{ historyParts(m).processes.length }}</span>
+                  <span class="r-toggle">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M9 18l6-6-6-6"/>
+                    </svg>
+                  </span>
+                </summary>
+                <div class="r-body">
+                  <div v-for="(proc, i) in historyParts(m).processes" :key="'proc-' + i" class="proc-item">
+                    <template v-if="proc.kind === 'reasoning'">
+                      <div class="proc-label">💭 思考</div>
+                      <div class="proc-text">{{ proc.text }}</div>
+                    </template>
+                    <template v-else-if="proc.kind === 'tool'">
+                      <details class="proc-tool">
+                        <summary>
+                          <span class="proc-label">⚙ {{ proc.name }}</span>
+                          <span class="proc-status">完成</span>
+                          <span class="proc-toggle">›</span>
+                        </summary>
+                        <div class="proc-detail">
+                          <div v-if="proc.input && Object.keys(proc.input).length" class="td">
+                            <span class="td-label">输入参数</span>
+                            <pre class="td-pre">{{ fmt(proc.input) }}</pre>
+                          </div>
+                          <div v-if="proc.output" class="td">
+                            <span class="td-label">返回结果</span>
+                            <pre class="td-pre">{{ proc.output }}</pre>
+                          </div>
+                        </div>
+                      </details>
+                    </template>
+                  </div>
+                </div>
+              </details>
+              <!-- 分隔线 -->
+              <div v-if="historyParts(m).processes.length > 0" class="history-divider"></div>
+              <!-- 最终回复内容：text 和 chart 按原始顺序穿插 -->
+              <template v-for="p in historyParts(m).content" :key="'content-' + p.key">
+                <div v-if="p.kind === 'text'" class="markdown history-text" v-html="md(p.text)"></div>
+                <div v-else-if="p.kind === 'chart'" class="chart-wrap">
+                  <SalaryChart v-if="p.data && p.data.net != null" :data="p.data" />
+                  <RentChart v-else-if="p.data && p.data.total != null" :data="p.data" />
+                </div>
+              </template>
+            </template>
+          </div>
+          <div class="msg-meta">
+            <span class="m-time">{{ fmtTime(msgTimes[m.id]) }}</span>
+            <span class="m-acts">
+              <button class="m-act" :class="{ ok: copiedId === m.id }" @click="copyMsg(m)" data-tip="复制">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+              </button>
+            </span>
           </div>
         </div>
       </template>
     </div>
-
-    <div v-if="messages.length" class="fade"></div>
 
     <!-- 错误条 -->
     <div v-if="error" class="errorbar">出错：{{ error.message || error }}</div>
@@ -254,13 +660,17 @@ const statusTone = computed(() => {
         <textarea
           v-model="input"
           rows="1"
-          placeholder="问我关于社保、公积金、到手工资的问题…"
+          placeholder="问我关于工资到手、社保公积金、租房成本的问题…"
           :disabled="status !== 'ready'"
           @input="autoGrow"
           @keydown.enter.exact.prevent="submit()"
         ></textarea>
         <div class="composer-bar">
-          <div class="mode" @click.stop="modeOpen = !modeOpen" title="回答模式">
+          <div class="mode" @click.stop="modeOpen = !modeOpen" title="回答风格">
+            <svg class="m-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 20h9"/>
+              <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+            </svg>
             <span class="m-label">{{ modeLabel(mode) }}</span>
             <span class="m-caret">▾</span>
             <div v-if="modeOpen" class="mode-menu">
@@ -270,7 +680,10 @@ const statusTone = computed(() => {
                 class="mode-opt"
                 :class="{ on: mode === opt.value }"
                 @click.stop="pickMode(opt.value)"
-              >{{ opt.label }}</div>
+              >
+                <div class="opt-label">{{ opt.label }}</div>
+                <div class="opt-desc">{{ opt.desc }}</div>
+              </div>
             </div>
           </div>
           <div class="bar-right">
@@ -280,8 +693,13 @@ const statusTone = computed(() => {
               :disabled="status !== 'ready'"
               @click="submit()"
               aria-label="发送"
-            >➤</button>
-            <button v-if="status === 'streaming'" class="stop" @click="stop" aria-label="停止">■</button>
+              data-tip="发送"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+            </button>
+            <button v-if="status === 'streaming'" class="stop" @click="stop" aria-label="停止" data-tip="停止生成">
+              <svg viewBox="0 0 24 24" fill="currentColor"><rect x="4.5" y="4.5" width="15" height="15" rx="2.5"/></svg>
+            </button>
           </div>
         </div>
       </div>
@@ -300,32 +718,69 @@ const statusTone = computed(() => {
   font-family: -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
   height: 100vh;
   width: 100%;
+  display: flex;
+  overflow: hidden;
   background:
-    radial-gradient(1200px 520px at 50% -8%, rgba(37, 99, 235, 0.16), transparent 60%),
-    radial-gradient(900px 460px at 88% 108%, rgba(56, 189, 248, 0.10), transparent 60%),
-    linear-gradient(180deg, #0c1220 0%, #121a2e 100%);
-  color: #e5eaf1;
+    radial-gradient(1200px 520px at 50% -8%, var(--glow), transparent 60%),
+    radial-gradient(900px 460px at 88% 108%, var(--glow2), transparent 60%),
+    linear-gradient(180deg, var(--bg-base) 0%, var(--bg-grad-end) 100%);
+  color: var(--text);
 }
 .inner {
-  max-width: 880px;
-  margin: 0 auto;
+  flex: 1;
+  min-width: 0;
   height: 100%;
   display: flex;
   flex-direction: column;
 }
 
 /* 顶栏 */
-header {
+.topbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 16px 24px;
-  border-bottom: 1px solid rgba(42, 58, 85, 0.5);
+  padding: 0 16px;
+  border-bottom: none;
+  min-height: 48px;
 }
-.brand {
+.topbar.has-title {
+  border-bottom: 1px solid var(--border-soft);
+}
+.topbar-title {
+  font-size: 14px;
+  color: var(--text);
+  font-weight: 500;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.topbar-disclaimer {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-faint);
+}
+.disclaimer {
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-faint);
+  padding: 0 0 8px;
+}
+.hamburger {
+  width: 38px; height: 38px; display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border); border-radius: 10px; background: transparent;
+  color: var(--text-2); cursor: pointer; transition: background .15s, color .15s;
+}
+.hamburger:hover { background: var(--border-line); color: var(--text); }
+.hamburger svg { width: 24px; height: 24px; }
+.hamburger:hover::after {
+  bottom: auto;
+  top: calc(100% + 6px);
+}
+.header-right {
   display: flex;
   align-items: center;
-  gap: 12px;
 }
 .logo {
   width: 36px;
@@ -334,35 +789,35 @@ header {
   align-items: center;
   justify-content: center;
   font-size: 19px;
-  color: #dbeafe;
+  color: var(--text-on-accent);
   border-radius: 10px;
-  background: linear-gradient(135deg, #2563eb, #38bdf8);
-  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.4);
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  box-shadow: 0 4px 14px var(--accent-glow);
 }
 header h1 {
   font-size: 17px;
   font-weight: 600;
-  color: #f1f5fb;
+  color: var(--text-strong);
 }
 .header-status {
   display: flex;
   align-items: center;
   gap: 7px;
   font-size: 12px;
-  color: #8aa0bd;
+  color: var(--text-dim);
   padding: 5px 12px;
   border-radius: 999px;
-  background: rgba(14, 23, 40, 0.7);
-  border: 1px solid #22304a;
+  background: var(--panel-soft-trans);
+  border: 1px solid var(--border);
 }
 .header-status .dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
 }
-.header-status.idle .dot { background: #34d399; }
-.header-status.busy .dot { background: #fbbf24; animation: pulse 1.2s infinite; }
-.header-status.err .dot { background: #f87171; }
+.header-status.idle .dot { background: var(--ok); }
+.header-status.busy .dot { background: var(--warn); animation: pulse 1.2s infinite; }
+.header-status.err .dot { background: var(--err); }
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
@@ -375,18 +830,29 @@ header h1 {
   display: flex;
   flex-direction: column;
   overflow-y: auto;
-  padding: 26px 28px 8px;
+  padding: 26px 28px 30px;
   scrollbar-width: thin;
-  scrollbar-color: #2a3a55 transparent;
+  scrollbar-color: transparent transparent;
+  transition: scrollbar-color 0.3s;
 }
-/* 消息区底部渐隐：仅在有消息时显示，内容滚到输入条上方时自然淡出 */
-.fade {
-  height: 40px;
-  margin-top: -40px;
-  background: linear-gradient(to bottom, transparent, rgba(12, 18, 32, 0.85));
-  pointer-events: none;
-  position: relative;
-  z-index: 2;
+.messages > * {
+  width: 100%;
+  max-width: min(1080px, calc(100vw - 320px));
+  margin-left: auto;
+  margin-right: auto;
+}
+.messages.scrolling {
+  scrollbar-color: var(--border-strong) transparent;
+}
+.messages::-webkit-scrollbar { width: 8px; }
+.messages::-webkit-scrollbar-track { background: transparent; }
+.messages::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 4px;
+  transition: background 0.3s;
+}
+.messages.scrolling::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
 }
 
 /* 初始态 */
@@ -394,27 +860,27 @@ header h1 {
   display: flex;
   flex-direction: column;
   align-items: center;
-  margin: auto;
-  padding: 40px 0;
+  margin: 6vh auto 0 auto;
+  padding: 20px 0;
   text-align: center;
 }
 .w-title {
-  font-size: 28px;
+  font-size: 32px;
   font-weight: 700;
   letter-spacing: 0.5px;
-  color: #f4f7fc;
+  color: var(--text-stronger);
 }
 .w-sub {
-  font-size: 14px;
-  color: #8aa0bd;
-  margin-top: 10px;
+  font-size: 15px;
+  color: var(--text-dim);
+  margin-top: 12px;
 }
 .presets {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: 12px;
-  margin-top: 34px;
-  max-width: 600px;
+  margin-top: 36px;
+  max-width: 640px;
   width: 100%;
   text-align: left;
 }
@@ -424,34 +890,49 @@ header h1 {
   gap: 10px;
   padding: 14px 16px;
   border-radius: 14px;
-  background: rgba(22, 34, 58, 0.8);
-  border: 1px solid #2a3a55;
-  color: #c4d4ec;
-  font-size: 13px;
+  background: var(--panel-trans);
+  border: 1px solid var(--border-strong);
+  color: var(--text-2);
+  font-size: 14px;
   line-height: 1.4;
   cursor: pointer;
   transition: all 0.15s;
 }
 .preset:hover {
-  background: #1d2b47;
-  border-color: #3b82c4;
-  color: #dbeafe;
+  background: var(--panel-hover);
+  border-color: var(--accent);
+  color: var(--text-strong);
   transform: translateY(-1px);
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
 }
 .p-icon { font-size: 18px; flex-shrink: 0; }
+.preset .p-icon {
+  width: 18px;
+  height: 18px;
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.preset .p-icon :deep(svg) {
+  width: 18px;
+  height: 18px;
+}
 .p-label { flex: 1; }
-.p-arrow { color: #5f7aa0; flex-shrink: 0; }
+.p-arrow { color: var(--text-faint); flex-shrink: 0; }
 .preset:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* 消息行 */
 .row {
+  position: relative;
   display: flex;
   gap: 12px;
   margin-bottom: 18px;
   align-items: flex-start;
 }
-.user-row { justify-content: flex-end; }
+.user-row { flex-direction: column; align-items: flex-end; }
+.user-row .msg-meta { position: static; margin-top: 7px; }
+.agent-row .msg-meta { left: 42px; right: auto; }
 .avatar {
   width: 30px;
   height: 30px;
@@ -463,159 +944,381 @@ header h1 {
   flex-shrink: 0;
 }
 .avatar.a {
-  background: linear-gradient(135deg, #2563eb, #38bdf8);
-  color: #dbeafe;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  color: var(--text-on-accent);
   font-size: 14px;
 }
 .bubble {
   max-width: 76%;
   padding: 12px 16px;
   border-radius: 14px;
-  font-size: 14px;
+  font-size: 16px;
   line-height: 1.7;
   white-space: pre-wrap;
   word-break: break-word;
 }
 .bubble.user {
-  background: linear-gradient(135deg, #2563eb, #1d4ed8);
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
   color: #fff;
   border-top-right-radius: 4px;
 }
 .bubble.agent {
-  background: rgba(22, 34, 58, 0.85);
-  border: 1px solid #22304a;
-  color: #e5eaf1;
-  border-top-left-radius: 4px;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
+  background: transparent;
+  border: none;
+  color: var(--text);
+  max-width: 100%;
+  padding: 0;
+  box-shadow: none;
 }
-.markdown { line-height: 1.7; }
+/* hover 操作栏：时间戳 + 功能 */
+.msg-meta {
+  position: absolute;
+  right: 0;
+  bottom: -20px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-faint);
+  opacity: 0;
+  transition: opacity 0.15s;
+  z-index: 3;
+}
+.row:hover .msg-meta { opacity: 1; }
+.m-time { margin-right: 2px; }
+.m-acts { display: flex; align-items: center; gap: 2px; }
+.m-act {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--text-dim);
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+}
+.m-act svg { width: 16px; height: 16px; }
+.m-act:hover { background: var(--panel-hover); color: var(--text-strong); }
+.m-act.ok { color: var(--ok); }
+.markdown { line-height: 1.5; }
 .markdown :deep(h1),
 .markdown :deep(h2),
 .markdown :deep(h3) {
-  margin: 12px 0 6px;
+  margin: 5px 0 1px;
   font-weight: 600;
-  color: #f1f5fb;
+  color: var(--text-strong);
 }
-.markdown :deep(h2) { font-size: 16px; }
-.markdown :deep(p) { margin: 6px 0; }
-.markdown :deep(strong) { color: #dbeafe; }
+.markdown :deep(h2) { font-size: 18px; }
+.markdown :deep(p) { margin: 8px 0; }
+.markdown :deep(strong) { color: var(--text-strong); }
 .markdown :deep(table) {
   width: 100%;
   border-collapse: collapse;
-  margin: 8px 0;
-  font-size: 13px;
+  margin: 12px 0;
+  font-size: 15px;
 }
 .markdown :deep(th),
 .markdown :deep(td) {
-  border: 1px solid #2a3a55;
-  padding: 6px 10px;
+  border: 1px solid var(--border-line);
+  padding: 4px 8px;
   text-align: left;
   vertical-align: top;
 }
-.markdown :deep(th) { background: #1d2b47; color: #c4d4ec; }
-.markdown :deep(tbody tr:nth-child(even) td) { background: #182440; }
+.markdown :deep(th) { background: var(--panel-th); color: var(--text-2); border-bottom: 1px solid var(--border-strong); }
+.markdown :deep(tbody tr:nth-child(even) td) { background: var(--panel-zebra); }
 .markdown :deep(code) {
-  background: #0e1728;
-  padding: 1px 6px;
+  background: var(--panel-code);
+  border: 1px solid var(--border);
+  padding: 1px 7px;
   border-radius: 6px;
-  font-size: 12px;
+  font-size: 16px;
+  font-family: Consolas, Monaco, 'Courier New', monospace;
 }
 .markdown :deep(ul),
-.markdown :deep(ol) { margin: 6px 0 6px 18px; }
-.markdown :deep(li) { margin: 3px 0; }
-.markdown :deep(a) { color: #60a5fa; }
+.markdown :deep(ol) { margin: 8px 0 8px 20px; padding-left: 0; }
+.markdown :deep(li) { margin: 4px 0; }
+.markdown :deep(a) { color: var(--text-link); text-decoration: underline; text-underline-offset: 3px; }
+.markdown :deep(a:hover) { color: var(--accent-deep); }
+.markdown :deep(h1) { font-size: 18px; }
+.markdown :deep(pre) {
+  background: var(--panel-code);
+  border: 1px solid var(--border-line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 6px 0;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.markdown :deep(pre code) { background: transparent; padding: 0; }
 /* 引用块：调轻，视觉退到辅助说明位置 */
 .markdown :deep(blockquote) {
-  border-left: 2px solid rgba(59, 130, 196, 0.45);
-  padding: 6px 12px;
-  margin: 8px 0;
-  color: #93a7c4;
-  font-size: 13px;
-  background: rgba(30, 41, 66, 0.35);
+  border-left: 2px solid var(--accent-soft);
+  padding: 4px 9px;
+  margin: 3px 0;
+  color: var(--text-muted);
+  font-size: 16px;
+  background: var(--panel-soft);
   border-radius: 0 8px 8px 0;
 }
 .agent-body { flex: 1; min-width: 0; }
 
 /* 工具过程：折叠条 */
 .process {
-  margin-bottom: 8px;
+  margin-bottom: 10px;
   border-radius: 10px;
-  background: rgba(14, 23, 40, 0.8);
-  border: 1px solid #22304a;
   overflow: hidden;
 }
 .process-head {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
-  font-size: 12px;
+  padding: 6px 8px;
+  margin: 0 -8px;
+  font-size: 13px;
   cursor: pointer;
-  color: #9fb4d4;
+  border-radius: 8px;
+  color: var(--text-3);
+  transition: background 0.15s;
 }
-.process-head:hover { background: #111c31; }
-.p-icon { color: #fbbf24; }
-.p-text { color: #c4d4ec; }
-.p-toggle { margin-left: auto; color: #8aa0bd; font-size: 10px; }
-.process-list { border-top: 1px solid #22304a; padding: 4px 0; }
-.tool-item { border-bottom: 1px solid #1c2a42; }
+.process-head:hover { background: var(--panel-hover2); }
+.process-head .p-icon { color: var(--warn); }
+.p-text { color: var(--text-2); }
+.p-toggle {
+  color: var(--text-dim);
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  transition: transform 0.15s;
+}
+.p-toggle svg { width: 100%; height: 100%; }
+.chev.open { transform: rotate(90deg); }
+.process-list { padding: 4px 0; }
+.tool-item { border-bottom: 1px solid var(--border-line); }
 .tool-item:last-child { border-bottom: none; }
 .tool-head {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 7px 12px;
-  font-size: 12px;
+  font-size: 13px;
   cursor: pointer;
 }
-.tool-head:hover { background: #111c31; }
-.ti-name { color: #e5eaf1; font-weight: 600; }
-.ti-state.ok { color: #34d399; }
-.ti-state.run { color: #fbbf24; }
-.ti-toggle { margin-left: auto; color: #8aa0bd; font-size: 10px; }
+.tool-head:hover { background: var(--panel-hover2); }
+.ti-name { color: var(--text); font-weight: 600; }
+.ti-state.ok { color: var(--ok); }
+.ti-state.run { color: var(--warn); }
+.ti-toggle {
+  color: var(--text-dim);
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  transition: transform 0.15s;
+}
+.ti-toggle svg { width: 100%; height: 100%; }
 .tool-detail { padding: 8px 12px 10px; }
 .td { margin-bottom: 6px; }
 .td:last-child { margin-bottom: 0; }
-.td-label { color: #8aa0bd; font-size: 11px; display: block; margin-bottom: 2px; }
+.td-label { color: var(--text-dim); font-size: 11px; display: block; margin-bottom: 2px; }
 .td-pre {
   white-space: pre-wrap;
   word-break: break-word;
-  color: #c4d4ec;
-  background: #101a2d;
+  color: var(--text-2);
+  background: var(--panel-deep);
   padding: 6px 8px;
   border-radius: 6px;
-  font-size: 12px;
+  font-size: 13px;
   margin: 0;
 }
 
 /* 图表 */
 .chart-wrap {
-  margin: 10px 0;
-  background: rgba(14, 23, 40, 0.8);
-  border: 1px solid #22304a;
+  margin: 8px 0 12px;
+  background: var(--panel-soft-trans);
+  border: none;
   border-radius: 12px;
   padding: 10px;
 }
 
-/* 打字光标 */
-.cursor {
-  display: inline-block;
-  width: 2px;
-  height: 15px;
-  background: #38bdf8;
-  vertical-align: text-bottom;
-  margin-left: 2px;
-  animation: caret 0.9s infinite;
+/* 思考过程折叠区 */
+.reasoning { margin-bottom: 4px; }
+.reasoning summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  list-style: none;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-dim);
+  padding: 5px 8px;
+  margin: 0 -8px;
+  border-radius: 8px;
+  user-select: none;
 }
-@keyframes caret { 50% { opacity: 0; } }
+.reasoning summary::-webkit-details-marker { display: none; }
+.reasoning summary:hover { background: var(--panel-hover2); }
+.reasoning .r-icon {
+  width: 14px;
+  height: 14px;
+  color: var(--text-faint);
+  display: inline-flex;
+  flex-shrink: 0;
+}
+.reasoning .r-icon svg { width: 100%; height: 100%; }
+.reasoning .r-label { color: var(--text-dim); }
+.reasoning .r-toggle {
+  color: var(--text-faint);
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  transition: transform 0.15s;
+}
+.reasoning .r-toggle svg { width: 100%; height: 100%; }
+.reasoning details[open] .r-toggle { transform: rotate(90deg); }
+.reasoning .r-body {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--panel-soft);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-top: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+/* 历史消息：总的思考过程折叠面板 */
+.history-reasoning {
+  margin-bottom: 8px;
+}
+.history-divider {
+  height: 1px;
+  background: var(--border-line, #e5e7eb);
+  margin: 8px 0 12px;
+}
+.history-text {
+  margin-bottom: 12px;
+}
+.history-text:last-child {
+  margin-bottom: 0;
+}
+.history-text p {
+  margin: 8px 0;
+}
+.history-text h1,
+.history-text h2,
+.history-text h3 {
+  margin: 16px 0 8px;
+}
+.history-reasoning .r-count {
+  color: var(--text-faint, #9ca3af);
+  font-size: 12px;
+  margin-left: 2px;
+}
+.history-reasoning .r-body {
+  max-height: none;
+  overflow-y: visible;
+  background: transparent;
+  padding: 4px 0 0 0;
+  margin-top: 0;
+}
+.history-reasoning .proc-item {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-line, #f0f0f0);
+}
+.history-reasoning .proc-item:last-child {
+  border-bottom: none;
+}
+.history-reasoning .proc-label {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 2px;
+}
+.history-reasoning .proc-text {
+  font-size: 13px;
+  color: var(--text-2);
+  line-height: 1.5;
+}
+.proc-tool {
+  margin: 4px 0;
+}
+.proc-tool summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  padding: 4px 0;
+  list-style: none;
+}
+.proc-tool summary::-webkit-details-marker { display: none; }
+.proc-status {
+  color: var(--ok, #10b981);
+  font-size: 12px;
+}
+.proc-toggle {
+  color: var(--text-faint, #9ca3af);
+  font-size: 14px;
+  transition: transform 0.15s;
+}
+.proc-tool[open] .proc-toggle {
+  transform: rotate(90deg);
+}
+.proc-detail {
+  padding: 4px 0 8px 20px;
+}
+.proc-detail .td {
+  margin-bottom: 8px;
+}
+.proc-detail .td-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 2px;
+}
+.proc-detail .td-pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  color: var(--text-2);
+  background: var(--panel-soft, #f5f5f5);
+  padding: 6px 8px;
+  border-radius: 6px;
+  margin: 0;
+}
+
+/* 思考中提示 */
+.thinking {
+  display: flex;
+  align-items: center;
+  font-size: 14px;
+  color: var(--text-dim);
+  padding: 4px 0 8px;
+}
+.thinking .dots { display: inline-flex; gap: 3px; margin-left: 2px; align-items: center; }
+.thinking .dots i {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: dot 1.2s infinite;
+}
+.thinking .dots i:nth-child(2) { animation-delay: 0.2s; }
+.thinking .dots i:nth-child(3) { animation-delay: 0.4s; }
+@keyframes dot {
+  0%, 100% { opacity: 0.2; }
+  50% { opacity: 1; }
+}
 
 /* 错误条 */
 .errorbar {
-  background: #45181b;
-  color: #fca5a5;
+  background: var(--err-bg);
+  color: var(--err-text);
   padding: 10px 24px;
   font-size: 13px;
-  border-top: 1px solid #5b2a2e;
+  border-top: 1px solid var(--err-border);
 }
 
 /* 输入区：大胶囊输入条 */
@@ -623,36 +1326,44 @@ header h1 {
   display: flex;
   align-items: flex-end;
   gap: 10px;
-  padding: 10px 24px 18px;
+  padding: 12px 24px 20px;
   background: transparent;
   border-top: none;
+  width: 100%;
+  max-width: min(1080px, calc(100vw - 320px));
+  margin: 0 auto;
 }
 .mode {
   position: relative;
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 4px 9px;
+  padding: 4px 6px;
   border-radius: 8px;
-  background: rgba(14, 23, 40, 0.7);
-  border: 1px solid #2a3a55;
-  font-size: 11px;
-  color: #9fb4d4;
+  background: transparent;
+  border: none;
+  font-size: 13px;
+  color: var(--text-2);
   cursor: pointer;
   flex-shrink: 0;
   align-self: flex-end;
   user-select: none;
-  transition: border-color 0.15s;
+  transition: color 0.15s;
 }
-.mode:hover { border-color: #3b82c4; }
-.m-caret { color: #5f7aa0; font-size: 10px; }
+.mode:hover { color: var(--text); background: var(--panel-soft); }
+.m-icon {
+  width: 14px;
+  height: 14px;
+  color: var(--text-faint);
+}
+.m-caret { color: var(--text-faint); font-size: 10px; }
 .mode-menu {
   position: absolute;
   bottom: calc(100% + 8px);
   left: 0;
-  min-width: 120px;
-  background: #16223a;
-  border: 1px solid #2a3a55;
+  min-width: 160px;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
   border-radius: 12px;
   padding: 4px;
   box-shadow: 0 -6px 20px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.25);
@@ -661,29 +1372,38 @@ header h1 {
 .mode-opt {
   padding: 8px 12px;
   border-radius: 8px;
-  font-size: 12px;
-  color: #c4d4ec;
   cursor: pointer;
+  transition: background 0.15s;
 }
-.mode-opt:hover { background: #1d2b47; color: #dbeafe; }
-.mode-opt.on { color: #60a5fa; font-weight: 600; }
+.opt-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  margin-bottom: 2px;
+}
+.opt-desc {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.mode-opt:hover { background: var(--panel-hover); color: var(--text-strong); }
+.mode-opt.on .opt-label { color: var(--accent); }
 .composer {
   flex: 1;
   display: flex;
   flex-direction: column;
-  background: #16223a;
-  border: 1px solid #2a3a55;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
   border-radius: 16px;
-  padding: 12px 14px 10px;
+  padding: 14px 16px 12px;
   transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
 }
 .composer:hover {
-  border-color: rgba(59, 130, 196, 0.6);
+  border-color: var(--accent-soft);
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
 }
 .composer:focus-within {
-  border-color: #3b82c4;
-  box-shadow: 0 0 0 3px rgba(59, 130, 196, 0.15);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
 }
 .composer textarea {
   width: 100%;
@@ -691,13 +1411,14 @@ header h1 {
   border: none;
   outline: none;
   resize: none;
-  color: #e5eaf1;
-  font-size: 14px;
+  color: var(--text);
+  font-size: 16px;
   line-height: 1.5;
-  max-height: 140px;
+  min-height: 28px;
+  max-height: 160px;
   font-family: inherit;
 }
-.composer textarea::placeholder { color: #5f7aa0; }
+.composer textarea::placeholder { color: var(--text-faint); }
 .composer textarea:disabled { cursor: not-allowed; }
 .composer-bar {
   display: flex;
@@ -715,26 +1436,49 @@ header h1 {
   justify-content: center;
   border: none;
   border-radius: 50%;
-  background: linear-gradient(135deg, #2563eb, #3b82c4);
-  color: #fff;
-  font-size: 14px;
+  background: var(--text);
+  color: var(--bg-base);
   cursor: pointer;
-  transition: transform 0.15s, box-shadow 0.15s;
+  transition: opacity 0.15s, transform 0.15s;
 }
-.send:hover:not(:disabled) {
-  transform: translateY(-1px);
-  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.4);
-}
-.send:disabled { background: #22304a; color: #5f7aa0; cursor: not-allowed; }
+.send svg { width: 16px; height: 16px; }
+.send:hover:not(:disabled) { opacity: .85; transform: translateY(-1px); }
+.send:disabled { background: var(--border); color: var(--text-faint); cursor: not-allowed; }
 .stop {
+  position: relative;
   width: 34px;
   height: 34px;
   flex-shrink: 0;
-  border: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-strong);
   border-radius: 50%;
-  background: #7f1d1d;
-  color: #fca5a5;
-  font-size: 13px;
+  background: var(--panel);
+  color: var(--text-dim);
   cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+.stop svg {
+  width: 20px;
+  height: 20px;
+  transition: transform 0.2s;
+}
+.stop:hover svg { transform: scale(1.12); }
+.stop::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid var(--accent);
+  opacity: 0.55;
+  animation: stopPulse 1.8s ease-out infinite;
+  pointer-events: none;
+}
+.stop:hover::before { opacity: 0; }
+.stop:hover { color: var(--err); border-color: var(--err); background: var(--err-bg); }
+@keyframes stopPulse {
+  0% { transform: scale(1); opacity: 0.55; }
+  100% { transform: scale(1.4); opacity: 0; }
 }
 </style>

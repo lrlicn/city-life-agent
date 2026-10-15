@@ -10,6 +10,11 @@ __pycache__/
 data/index/
 data/qdrant_data/
 
+# 会话持久化数据库（运行时生成，不提交）
+data/app.db
+data/app.db-wal
+data/app.db-shm
+
 # 前端工程（未来 Vue/React）
 node_modules/
 dist/

@@ -15,7 +15,7 @@ from agentscope.tool import FunctionTool, Toolkit
 
 from src import config
 from src.prompts import build_prompt
-from src.tools import compute_salary
+from src.tools import compute_salary, compute_rent
 
 
 def make_chat_model() -> OpenAIChatModel:
@@ -45,7 +45,7 @@ async def build_rag_agent(knowledge: KnowledgeBase, mode: str | None = None) -> 
     # agentic 模式必须手动把 search_knowledge 工具注入 Toolkit
     # 自定义计算工具用 FunctionTool 包装（本版本无 @tool 装饰器）
     rag_tools = await rag_mw.list_tools()
-    toolkit = Toolkit(tools=[FunctionTool(compute_salary), *rag_tools])
+    toolkit = Toolkit(tools=[FunctionTool(compute_salary), FunctionTool(compute_rent), *rag_tools])
 
     agent = Agent(
         name="rag-agent",

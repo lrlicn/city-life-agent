@@ -8,6 +8,12 @@ const props = defineProps({
 
 const el = ref(null)
 let chart = null
+let themeObserver = null
+
+// 从全局主题变量读取颜色（深/浅两档随 data-theme 变化）
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || '#888'
+}
 
 function render() {
   if (!el.value) return
@@ -23,30 +29,30 @@ function render() {
       text: title,
       left: 'center',
       top: 4,
-      textStyle: { color: '#e5eaf1', fontSize: 13, fontWeight: 500 },
+      textStyle: { color: cssVar('--text-strong'), fontSize: 13, fontWeight: 500 },
     },
     tooltip: {
       trigger: 'axis',
       axisPointer: { type: 'shadow' },
-      backgroundColor: '#16223a',
-      borderColor: '#2a3a55',
-      textStyle: { color: '#e5eaf1', fontSize: 12 },
+      backgroundColor: cssVar('--panel'),
+      borderColor: cssVar('--border-strong'),
+      textStyle: { color: cssVar('--text'), fontSize: 12 },
       valueFormatter: v => (v >= 10000 ? (v / 10000).toFixed(2) + ' 万' : v + ' 元'),
     },
     grid: { left: 56, right: 64, top: 44, bottom: 8 },
     xAxis: {
       type: 'value',
       axisLabel: {
-        color: '#8aa0bd',
+        color: cssVar('--text-dim'),
         formatter: v => (v >= 10000 ? (v / 10000).toFixed(1) + '万' : v),
       },
-      splitLine: { lineStyle: { color: '#1c2a42' } },
+      splitLine: { lineStyle: { color: cssVar('--border-line') } },
       axisLine: { show: false },
     },
     yAxis: {
       type: 'category',
       data: ['社保', '公积金', '个税', '到手'],
-      axisLabel: { color: '#c4d4ec' },
+      axisLabel: { color: cssVar('--text-2') },
       axisLine: { show: false },
       axisTick: { show: false },
     },
@@ -63,7 +69,7 @@ function render() {
         label: {
           show: true,
           position: 'right',
-          color: '#e5eaf1',
+          color: cssVar('--text'),
           formatter: p => (p.value >= 10000 ? (p.value / 10000).toFixed(2) + '万' : p.value + ''),
         },
       },
@@ -78,9 +84,16 @@ function onResize() {
 onMounted(() => {
   render()
   window.addEventListener('resize', onResize)
+  // 主题切换（html[data-theme] 变化）时重新取色重绘
+  themeObserver = new MutationObserver(() => render())
+  themeObserver.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ['data-theme'],
+  })
 })
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onResize)
+  themeObserver?.disconnect()
   chart?.dispose()
   chart = null
 })
