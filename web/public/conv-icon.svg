@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="convbg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#4f6ef7;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#3b5bdb;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="50%" fill="url(#convbg)"/>
+  <!-- 对话气泡图标 -->
+  <path d="M20 20 H44 Q48 20 48 24 V40 Q48 44 44 44 H28 L20 50 V44 Q16 44 16 40 V24 Q16 20 20 20 Z" fill="white" opacity="0.95"/>
+  <circle cx="26" cy="32" r="2" fill="#4f6ef7"/>
+  <circle cx="32" cy="32" r="2" fill="#4f6ef7"/>
+  <circle cx="38" cy="32" r="2" fill="#4f6ef7"/>
+</svg>

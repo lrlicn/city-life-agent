@@ -12,9 +12,9 @@ import Sidebar from './Sidebar.vue'
 const mode = ref('standard')
 const input = ref('')
 const MODES = [
-  { label: '简洁', value: 'brief', desc: '只给结论，快速回答' },
-  { label: '标准', value: 'standard', desc: '结论 + 简要说明' },
-  { label: '详细', value: 'report', desc: '完整报告，含计算过程' },
+  { label: '简洁', value: 'brief', desc: '只给结论，快速回答', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>' },
+  { label: '标准', value: 'standard', desc: '结论 + 简要说明', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>' },
+  { label: '详细', value: 'report', desc: '完整报告，含计算过程', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>' },
 ]
 const modeOpen = ref(false)
 function modeLabel(v) {
@@ -62,6 +62,9 @@ const { messages, sendMessage, status, error, stop } = useChat({
     }),
   }),
   onFinish: async () => {
+    // 记录最后一条 AI 消息的结束时间
+    const lastAiMsg = [...messages.value].reverse().find(m => m.role === 'assistant')
+    if (lastAiMsg?.id) msgEndTimes[lastAiMsg.id] = Date.now()
     // 新建会话首次发消息后，后端自动建了会话，刷新列表拿到 id
     await loadConvs()
     // 如果当前是临时会话 id，替换成后端真正的会话 id
@@ -76,6 +79,10 @@ const { messages, sendMessage, status, error, stop } = useChat({
 const convId = ref(localStorage.getItem('convId') || '')
 const sidebarOpen = ref(true)
 const conversations = ref([])
+// 消息编辑状态
+const editingId = ref(null)
+const editText = ref('')
+const editInputRef = ref(null)
 
 async function loadConvs() {
   try {
@@ -367,11 +374,22 @@ const showThinking = computed(() => {
 
 // 消息时间戳与操作
 const msgTimes = reactive({})
+const msgEndTimes = reactive({})
 watch(messages, (ms) => {
   for (const m of ms) {
     if (m.id && msgTimes[m.id] == null) msgTimes[m.id] = Date.now()
   }
 }, { deep: true })
+
+// 格式化用时
+function fmtDuration(startTs, endTs) {
+  if (!startTs || !endTs) return ''
+  const sec = Math.round((endTs - startTs) / 1000)
+  if (sec < 60) return `共用时 ${sec} 秒`
+  const min = Math.floor(sec / 60)
+  const restSec = sec % 60
+  return `共用时 ${min} 分 ${restSec} 秒`
+}
 const copiedId = ref(null)
 function fmtTime(ts) {
   if (!ts) return ''
@@ -401,7 +419,51 @@ async function copyMsg(m) {
 }
 function regenerate(m) {
   const t = userText(m)
-  if (!t || status.value !== 'ready') return
+  if (!t) return
+  // 把消息放到输入框里，让用户编辑后重新发送
+  input.value = t
+  // 聚焦输入框
+  nextTick(() => {
+    const ta = document.querySelector('.composer textarea')
+    if (ta) ta.focus()
+  })
+}
+
+// 开始编辑用户消息
+function startEdit(m) {
+  editingId.value = m.id
+  editText.value = userText(m)
+  // 自动调整输入框高度
+  setTimeout(() => {
+    const ta = document.querySelector('.edit-input')
+    if (ta) {
+      ta.style.height = 'auto'
+      ta.style.height = ta.scrollHeight + 'px'
+    }
+  }, 50)
+}
+
+// 取消编辑
+function cancelEdit() {
+  editingId.value = null
+  editText.value = ''
+}
+
+// 编辑输入框自动高度
+function autoGrowEdit(e) {
+  const ta = e.target
+  ta.style.height = 'auto'
+  ta.style.height = ta.scrollHeight + 'px'
+}
+
+// 确认编辑并重新发送
+function confirmEdit(m) {
+  const t = editText.value.trim()
+  if (!t) return
+  // 更新消息内容
+  m.parts = [{ type: 'text', text: t }]
+  cancelEdit()
+  // 重新发送
   sendMessage({ text: t })
 }
 
@@ -496,22 +558,41 @@ onBeforeUnmount(() => clearTimeout(scrollTimer))
       <!-- 对话 -->
       <template v-for="m in messages" :key="m.id">
         <div v-if="m.role === 'user'" class="row user-row">
-          <div class="bubble user">{{ userText(m) }}</div>
-          <div class="msg-meta">
-            <span class="m-time">{{ fmtTime(msgTimes[m.id]) }}</span>
-            <span class="m-acts">
-              <button class="m-act" :class="{ ok: copiedId === m.id }" @click="copyMsg(m)" data-tip="复制">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
-              </button>
-              <button class="m-act" @click="regenerate(m)" data-tip="重新生成">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
-              </button>
-            </span>
+          <!-- 编辑状态：显示输入框 -->
+          <div v-if="editingId === m.id" class="bubble user edit-bubble">
+            <textarea
+              v-model="editText"
+              class="edit-input"
+              @input="autoGrowEdit"
+              @keydown.enter.prevent="confirmEdit(m)"
+              @keydown.esc="cancelEdit"
+            ></textarea>
+            <div class="edit-actions">
+              <button class="edit-btn cancel" @click="cancelEdit">取消</button>
+              <button class="edit-btn confirm" @click="confirmEdit(m)">发送</button>
+            </div>
           </div>
+          <!-- 正常状态：显示消息文本 -->
+          <template v-else>
+            <div class="bubble user">{{ userText(m) }}</div>
+            <div class="msg-meta">
+              <span class="m-time">{{ fmtTime(msgTimes[m.id]) }}</span>
+              <span class="m-acts">
+                <button class="m-act" :class="{ ok: copiedId === m.id }" @click="copyMsg(m)" data-tip="复制">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+                </button>
+                <button class="m-act" @click="startEdit(m)" data-tip="修改">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                </button>
+              </span>
+            </div>
+          </template>
         </div>
 
         <div v-else class="row agent-row">
-          <div class="avatar a">◈</div>
+          <div class="avatar a">
+            <img src="/ai-avatar.svg" alt="AI" style="width:100%;height:100%;border-radius:9px"/>
+          </div>
           <div class="agent-body">
             <!-- 思考中占位：尚未产出任何内容时的友好提示 -->
             <div v-if="showThinking" class="thinking">让我算一算<span class="dots"><i></i><i></i><i></i></span></div>
@@ -536,6 +617,7 @@ onBeforeUnmount(() => clearTimeout(scrollTimer))
                           <path d="M9 18l6-6-6-6"/>
                         </svg>
                       </span>
+                      <span class="r-duration">{{ fmtDuration(msgTimes[m.id], msgEndTimes[m.id]) }}</span>
                     </summary>
                     <div class="r-body">{{ p.text }}</div>
                   </details>
@@ -598,6 +680,7 @@ onBeforeUnmount(() => clearTimeout(scrollTimer))
                       <path d="M9 18l6-6-6-6"/>
                     </svg>
                   </span>
+                  <span class="r-duration">{{ fmtDuration(msgTimes[m.id], msgEndTimes[m.id]) }}</span>
                 </summary>
                 <div class="r-body">
                   <div v-for="(proc, i) in historyParts(m).processes" :key="'proc-' + i" class="proc-item">
@@ -639,13 +722,21 @@ onBeforeUnmount(() => clearTimeout(scrollTimer))
               </template>
             </template>
           </div>
-          <div class="msg-meta">
-            <span class="m-time">{{ fmtTime(msgTimes[m.id]) }}</span>
+          <div v-if="!isLastAssistantMsg(m) || status !== 'streaming'" class="msg-meta agent-meta">
             <span class="m-acts">
               <button class="m-act" :class="{ ok: copiedId === m.id }" @click="copyMsg(m)" data-tip="复制">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
               </button>
+              <button class="m-act" @click="regenerate(m)" data-tip="重新生成">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
+              </button>
+              <button class="m-act" data-tip="收藏">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                </svg>
+              </button>
             </span>
+            <span class="m-time">{{ fmtTime(msgTimes[m.id]) }}</span>
           </div>
         </div>
       </template>
@@ -666,13 +757,19 @@ onBeforeUnmount(() => clearTimeout(scrollTimer))
           @keydown.enter.exact.prevent="submit()"
         ></textarea>
         <div class="composer-bar">
-          <div class="mode" @click.stop="modeOpen = !modeOpen" title="回答风格">
+          <div class="mode" @click.stop="modeOpen = !modeOpen" data-tip="回答风格">
             <svg class="m-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 20h9"/>
-              <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+              <line x1="8" y1="6" x2="21" y2="6"/>
+              <line x1="8" y1="12" x2="21" y2="12"/>
+              <line x1="8" y1="18" x2="21" y2="18"/>
+              <line x1="3" y1="6" x2="3.01" y2="6"/>
+              <line x1="3" y1="12" x2="3.01" y2="12"/>
+              <line x1="3" y1="18" x2="3.01" y2="18"/>
             </svg>
             <span class="m-label">{{ modeLabel(mode) }}</span>
-            <span class="m-caret">▾</span>
+            <svg class="m-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M6 9l6 6 6-6"/>
+            </svg>
             <div v-if="modeOpen" class="mode-menu">
               <div
                 v-for="opt in MODES"
@@ -681,8 +778,18 @@ onBeforeUnmount(() => clearTimeout(scrollTimer))
                 :class="{ on: mode === opt.value }"
                 @click.stop="pickMode(opt.value)"
               >
-                <div class="opt-label">{{ opt.label }}</div>
-                <div class="opt-desc">{{ opt.desc }}</div>
+                <div class="opt-text">
+                  <span class="opt-icon" v-html="opt.icon"></span>
+                  <div class="opt-labels">
+                    <div class="opt-label">{{ opt.label }}</div>
+                    <div class="opt-desc">{{ opt.desc }}</div>
+                  </div>
+                </div>
+                <span v-if="mode === opt.value" class="opt-check">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M20 6L9 17l-5-5"/>
+                  </svg>
+                </span>
               </div>
             </div>
           </div>
@@ -739,9 +846,9 @@ onBeforeUnmount(() => clearTimeout(scrollTimer))
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 0 16px;
+  padding: 8px 16px;
   border-bottom: none;
-  min-height: 48px;
+  min-height: 60px;
 }
 .topbar.has-title {
   border-bottom: 1px solid var(--border-soft);
@@ -932,7 +1039,55 @@ header h1 {
 }
 .user-row { flex-direction: column; align-items: flex-end; }
 .user-row .msg-meta { position: static; margin-top: 7px; }
-.agent-row .msg-meta { left: 42px; right: auto; }
+.edit-bubble {
+  padding: 12px 16px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  color: #fff;
+  border-radius: 14px;
+  border-top-right-radius: 4px;
+  display: inline-flex;
+  flex-direction: column;
+  width: 50%;
+  max-width: 50%;
+}
+.edit-input {
+  border: none;
+  background: transparent;
+  resize: none;
+  outline: none;
+  font-size: 16px;
+  line-height: 1.7;
+  color: #fff;
+  padding: 0;
+  width: 100%;
+  min-width: 300px;
+  font-family: inherit;
+}
+.edit-input::placeholder {
+  color: rgba(255, 255, 255, 0.6);
+}
+.edit-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+.edit-btn {
+  padding: 4px 12px;
+  border-radius: 6px;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+}
+.edit-btn.cancel {
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+.edit-btn.confirm {
+  background: #fff;
+  color: var(--accent, #4f6ef7);
+}
+.agent-row .msg-meta { left: 42px; right: auto; bottom: -30px; }
 .avatar {
   width: 30px;
   height: 30px;
@@ -977,16 +1132,20 @@ header h1 {
   bottom: -20px;
   display: flex;
   align-items: center;
-  gap: 4px;
-  font-size: 12px;
+  gap: 6px;
+  font-size: 13px;
   color: var(--text-faint);
   opacity: 0;
   transition: opacity 0.15s;
   z-index: 3;
 }
 .row:hover .msg-meta { opacity: 1; }
-.m-time { margin-right: 2px; }
-.m-acts { display: flex; align-items: center; gap: 2px; }
+/* AI 消息的操作栏：始终显示 */
+.agent-meta {
+  opacity: 1;
+}
+.m-time { margin-right: 2px; font-size: 14px; }
+.m-acts { display: flex; align-items: center; gap: 4px; }
 .m-act {
   border: none;
   background: transparent;
@@ -1168,6 +1327,12 @@ header h1 {
 }
 .reasoning .r-icon svg { width: 100%; height: 100%; }
 .reasoning .r-label { color: var(--text-dim); }
+.reasoning .r-duration {
+  color: var(--text-faint);
+  font-size: 12px;
+  margin-left: auto;
+  margin-right: 8px;
+}
 .reasoning .r-toggle {
   color: var(--text-faint);
   width: 14px;
@@ -1337,8 +1502,8 @@ header h1 {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 4px 6px;
+  gap: 6px;
+  padding: 6px 10px;
   border-radius: 8px;
   background: transparent;
   border: none;
@@ -1348,33 +1513,64 @@ header h1 {
   flex-shrink: 0;
   align-self: flex-end;
   user-select: none;
-  transition: color 0.15s;
+  transition: all 0.15s;
 }
-.mode:hover { color: var(--text); background: var(--panel-soft); }
+.mode:hover { color: var(--text); background: var(--panel-soft); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15); }
 .m-icon {
   width: 14px;
   height: 14px;
   color: var(--text-faint);
 }
-.m-caret { color: var(--text-faint); font-size: 10px; }
+.m-caret {
+  width: 12px;
+  height: 12px;
+  color: var(--text-faint);
+}
 .mode-menu {
   position: absolute;
   bottom: calc(100% + 8px);
   left: 0;
-  min-width: 160px;
+  min-width: 200px;
   background: var(--panel);
   border: 1px solid var(--border-strong);
   border-radius: 12px;
-  padding: 4px;
-  box-shadow: 0 -6px 20px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.25);
+  padding: 6px;
+  box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.5), 0 12px 32px rgba(0, 0, 0, 0.35);
   z-index: 10;
 }
 .mode-opt {
-  padding: 8px 12px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
   border-radius: 8px;
   cursor: pointer;
   transition: background 0.15s;
 }
+.opt-check {
+  width: 16px;
+  height: 16px;
+  color: var(--accent);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.opt-check svg { width: 100%; height: 100%; }
+.opt-text {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex: 1;
+}
+.opt-icon {
+  width: 16px;
+  height: 16px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.opt-icon svg { width: 100%; height: 100%; }
+.opt-labels { flex: 1; }
 .opt-label {
   font-size: 13px;
   font-weight: 500;

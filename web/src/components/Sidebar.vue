@@ -103,8 +103,10 @@ function fmtTime(ts) {
   <aside class="sidebar" :class="{ collapsed: !open }">
     <!-- 品牌头 -->
     <div class="brand-head">
-      <div class="brand-logo">◈</div>
-      <span class="brand-name">城市生活计算管家</span>
+      <div class="brand-logo">
+        <img src="/logo.svg" alt="Logo" style="width:100%;height:100%;border-radius:6px"/>
+      </div>
+      <span class="brand-name">城事小灵通智能体</span>
       <button class="collapse-btn" @click="emit('close')" aria-label="收起侧栏" data-tip="收起侧栏">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="4"/><line x1="14" y1="4" x2="14" y2="20"/></svg>
       </button>
@@ -140,6 +142,9 @@ function fmtTime(ts) {
           />
         </template>
         <template v-else>
+          <div class="conv-avatar">
+            <img src="/conv-icon.svg" alt="" style="width:100%;height:100%;border-radius:50%"/>
+          </div>
           <span class="conv-title">
             <span class="conv-title-inner" :data-text="c.title">{{ c.title }}</span>
           </span>
@@ -256,6 +261,13 @@ function fmtTime(ts) {
 .conv-item {
   position: relative; display: flex; align-items: center; gap: 8px;
   padding: 9px 10px; border-radius: 9px; cursor: pointer; margin-bottom: 2px;
+  overflow: hidden;
+}
+.conv-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  flex-shrink: 0;
   overflow: hidden;
 }
 .conv-item:hover { background: var(--panel-soft); }

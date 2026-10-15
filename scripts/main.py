@@ -37,7 +37,7 @@ async def main(question: str, mode: str) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="城市生活计算管家（RAG + ReAct Agent）")
+    parser = argparse.ArgumentParser(description="城事小灵通智能体（RAG + ReAct Agent）")
     parser.add_argument(
         "--mode",
         choices=REPLY_MODES,

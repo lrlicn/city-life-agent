@@ -173,8 +173,12 @@ async def event_gen_ai(req: ChatRequest):
                     history_msgs.append(AssistantMsg(name="rag-agent", content=t))
         new_msg = UserMsg(name="user", content=req.question)
         inputs = history_msgs + [new_msg] if history_msgs else new_msg
-        yield 'data: {"type":"start","messageId":"msg_1"}\n\n'
-        text_id = "text_1"
+        # 用户消息立刻写入数据库，保证下一轮对话能读到历史
+        db.add_message(conv_id, "user",
+                       [{"type": "text", "text": req.question}], mode=req.mode)
+        msg_id = f"msg_{conv_id}_{int(__import__('time').time() * 1000)}"
+        yield f'data: {json.dumps({"type":"start","messageId":msg_id})}\n\n'
+        text_id = f"text_{msg_id}"
         text_started = False
         final_text = ""          # 累积最终回答文本（落库用）
         reasoning_text = ""      # 累积思考过程文本（落库用）
@@ -270,13 +274,10 @@ async def event_gen_ai(req: ChatRequest):
                     current_text["text"] += event.delta
         if text_started:
             yield f"data: {json.dumps({'type': 'text-end', 'id': text_id}, ensure_ascii=False)}\n\n"
-        # 落库：user 消息 + assistant 消息（多轮记忆持久化）
-        db.add_message(conv_id, "user",
-                       [{"type": "text", "text": req.question}], mode=req.mode)
         # 把最后累积的 text part 加入 stream_parts
         if current_text is not None and current_text["text"].strip():
             stream_parts.append(current_text)
-        # 按原始顺序落库
+        # 按原始顺序落库：assistant 消息（user 消息已在流式开始前写入）
         if stream_parts:
             db.add_message(conv_id, "assistant", stream_parts, mode=req.mode)
         db.touch_conversation(conv_id)

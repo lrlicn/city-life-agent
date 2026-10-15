@@ -135,19 +135,20 @@ body {
 [data-tip]::after {
   content: attr(data-tip);
   position: absolute;
-  bottom: calc(100% + 6px);
+  bottom: calc(100% + 8px);
   left: 50%;
-  transform: translateX(-50%) translateY(2px);
-  padding: 4px 8px;
-  border-radius: 6px;
-  background: #1a1a1a;
+  transform: translateX(-50%) translateY(4px);
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(30, 30, 30, 0.95);
   color: #fff;
   font-size: 12px;
   white-space: nowrap;
   pointer-events: none;
   opacity: 0;
-  transition: opacity .15s, transform .15s;
+  transition: opacity .2s, transform .2s;
   z-index: 200;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
 }
 [data-tip]:hover::after {
   opacity: 1;
