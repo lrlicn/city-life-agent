@@ -10,12 +10,12 @@ from agentscope.message import UserMsg
 from agentscope.middleware import RAGMiddleware
 from agentscope.model import OpenAIChatModel
 from agentscope.rag import KnowledgeBase
-from agentscope.permission import PermissionMode
+from agentscope.permission import PermissionMode, PermissionRule, PermissionBehavior
 from agentscope.tool import FunctionTool, Toolkit
 
 from src import config
 from src.prompts import build_prompt
-from src.tools import compute_salary, compute_rent
+from src.tools import compute_salary, compute_rent, compute_commute, compute_mortgage, compute_cost_index, ask_user, export_report
 
 
 def make_chat_model() -> OpenAIChatModel:
@@ -28,12 +28,15 @@ def make_chat_model() -> OpenAIChatModel:
     )
 
 
-async def build_rag_agent(knowledge: KnowledgeBase, mode: str | None = None) -> Agent:
+async def build_rag_agent(knowledge: KnowledgeBase, mode: str | None = None,
+                          require_approval: bool = False) -> Agent:
     """把已建好的知识库通过 RAGMiddleware(agentic) 接入 Agent。
 
     Args:
         knowledge: 已建好的知识库。
         mode: 回答模式（brief/standard/report），None 时用 config.REPLY_MODE。
+        require_approval: 为 True 时启用工具审批 HITL（副作用类工具执行前需用户确认）；
+            为 False 时保持 BYPASS（工具自动放行，即现状）。
     """
     chat_model = make_chat_model()
 
@@ -45,7 +48,18 @@ async def build_rag_agent(knowledge: KnowledgeBase, mode: str | None = None) -> 
     # agentic 模式必须手动把 search_knowledge 工具注入 Toolkit
     # 自定义计算工具用 FunctionTool 包装（本版本无 @tool 装饰器）
     rag_tools = await rag_mw.list_tools()
-    toolkit = Toolkit(tools=[FunctionTool(compute_salary), FunctionTool(compute_rent), *rag_tools])
+    toolkit = Toolkit(
+        tools=[
+            FunctionTool(compute_salary),
+            FunctionTool(compute_rent),
+            FunctionTool(compute_commute),
+            FunctionTool(compute_mortgage),
+            FunctionTool(compute_cost_index),
+            FunctionTool(ask_user),
+            FunctionTool(export_report),
+            *rag_tools,
+        ]
+    )
 
     agent = Agent(
         name="rag-agent",
@@ -55,9 +69,31 @@ async def build_rag_agent(knowledge: KnowledgeBase, mode: str | None = None) -> 
         toolkit=toolkit,
         middlewares=[rag_mw],
     )
-    # 本项目的工具都是安全的纯计算/检索，跳过权限确认（BYPASS）。
+    # 权限链路：默认全部工具自动放行（BYPASS），因为本项目工具多为安全纯计/检索。
     # 否则工具调用会发出 RequireUserConfirmEvent 等待人工批准，流程卡住无最终回答。
-    agent.state.permission_context.mode = PermissionMode.BYPASS
+    ctx = agent.state.permission_context
+    if require_approval:
+        # 审阅模式：对“行动类”工具（真正产出测算/未来的写文件导出）要求确认。
+        # ask_rules 在 DEFAULT 引擎里优先于只读快路（Step2），能稳定触发确认卡片；
+        # search_knowledge / ask_user 则加 allow_rules 自动放行，避免无谓弹窗。
+        ctx.mode = PermissionMode.DEFAULT
+        action_tools = [
+            "compute_salary", "compute_rent", "compute_commute",
+            "compute_mortgage", "compute_cost_index", "export_report",
+        ]
+        pass_tools = ["search_knowledge", "ask_user"]
+        ctx.ask_rules = {
+            t: [PermissionRule(tool_name=t, rule_content=None,
+                               behavior=PermissionBehavior.ASK, source="session")]
+            for t in action_tools
+        }
+        ctx.allow_rules = {
+            t: [PermissionRule(tool_name=t, rule_content=None,
+                               behavior=PermissionBehavior.ALLOW, source="session")]
+            for t in pass_tools
+        }
+    else:
+        ctx.mode = PermissionMode.BYPASS
     return agent
 
 

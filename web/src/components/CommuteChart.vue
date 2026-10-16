@@ -1,0 +1,116 @@
+<script setup>
+import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
+import * as echarts from 'echarts'
+
+const props = defineProps({
+  data: { type: Object, required: true },
+})
+
+const el = ref(null)
+let chart = null
+let themeObserver = null
+
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || '#888'
+}
+
+function render() {
+  if (!el.value) return
+  if (!chart) chart = echarts.init(el.value)
+  const d = props.data
+  const title =
+    d.city && d.one_way_km != null
+      ? `${d.city} · 单程 ${d.one_way_km} 公里 · 月度通勤成本对比`
+      : '月度通勤成本对比'
+  const modes = [
+    { name: '地铁/公交', value: d.subway },
+    { name: '电动车', value: d.ebike },
+    { name: '自驾', value: d.drive },
+    { name: '打车', value: d.taxi },
+  ].filter(m => m.value != null)
+  // 最省的方式用绿色高亮，其余中性蓝
+  const colorFor = m => (d.cheapest && m.name === d.cheapest ? '#34d399' : '#3b82c4')
+  chart.setOption({
+    backgroundColor: 'transparent',
+    title: {
+      text: title,
+      left: 'center',
+      top: 4,
+      textStyle: { color: cssVar('--text-strong'), fontSize: 13, fontWeight: 500 },
+    },
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'shadow' },
+      backgroundColor: cssVar('--panel'),
+      borderColor: cssVar('--border-strong'),
+      textStyle: { color: cssVar('--text'), fontSize: 12 },
+      valueFormatter: v => (v >= 10000 ? (v / 10000).toFixed(2) + ' 万' : v + ' 元/月'),
+    },
+    grid: { left: 76, right: 64, top: 44, bottom: 8 },
+    xAxis: {
+      type: 'value',
+      axisLabel: {
+        color: cssVar('--text-dim'),
+        formatter: v => (v >= 10000 ? (v / 10000).toFixed(1) + '万' : v),
+      },
+      splitLine: { lineStyle: { color: cssVar('--border-line') } },
+      axisLine: { show: false },
+    },
+    yAxis: {
+      type: 'category',
+      data: modes.map(m => (d.cheapest && m.name === d.cheapest ? m.name + ' ✓' : m.name)),
+      axisLabel: { color: cssVar('--text-2') },
+      axisLine: { show: false },
+      axisTick: { show: false },
+    },
+    series: [
+      {
+        type: 'bar',
+        data: modes.map(m => ({
+          value: m.value,
+          itemStyle: { color: colorFor(m), borderRadius: [0, 6, 6, 0] },
+        })),
+        barWidth: 20,
+        label: {
+          show: true,
+          position: 'right',
+          color: cssVar('--text'),
+          formatter: p => (p.value >= 10000 ? (p.value / 10000).toFixed(2) + '万' : p.value + ''),
+        },
+      },
+    ],
+  })
+}
+
+function onResize() {
+  chart?.resize()
+}
+
+onMounted(() => {
+  render()
+  window.addEventListener('resize', onResize)
+  themeObserver = new MutationObserver(() => render())
+  themeObserver.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ['data-theme'],
+  })
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', onResize)
+  themeObserver?.disconnect()
+  chart?.dispose()
+  chart = null
+})
+watch(() => props.data, render, { deep: true })
+</script>
+
+<template>
+  <div ref="el" class="commute-chart"></div>
+</template>
+
+<style scoped>
+.commute-chart {
+  width: 100%;
+  height: 220px;
+}
+</style>

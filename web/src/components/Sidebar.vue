@@ -1,14 +1,19 @@
 <script setup>
 import { ref, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
+import { useSettings } from '../composables/useSettings.js'
+
+// 全局审批开关（与 ChatView 输入条 chip 绑定同一份共享状态）
+const { requireApproval, toggleApproval } = useSettings()
 
 const props = defineProps({
   conversations: { type: Array, default: () => [] },
   activeId: { type: String, default: '' },
   open: { type: Boolean, default: true },
   statusTone: { type: String, default: 'idle' },
+  bookmarkCount: { type: Number, default: 0 },
 })
 
-const emit = defineEmits(['close', 'select', 'new', 'rename', 'delete'])
+const emit = defineEmits(['close', 'select', 'new', 'rename', 'delete', 'openBookmarks'])
 
 const editingId = ref('')
 const editText = ref('')
@@ -151,7 +156,7 @@ function fmtTime(ts) {
           <span v-if="c.id === activeId && statusTone === 'busy'" class="loading-dot"></span>
           <span class="conv-time">{{ fmtTime(c.updated_at) }}</span>
           <span class="conv-acts" @click.stop>
-            <button class="cact" title="重命名" data-tip="重命名" @click="startRename(c)">
+            <button class="cact" aria-label="重命名" data-tip="重命名" @click="startRename(c)">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3l4 4L8 20l-5 1 1-5z"/></svg>
             </button>
             <button class="cact del" data-tip="删除会话" @click="confirmDel = { id: c.id, title: c.title }">
@@ -163,8 +168,15 @@ function fmtTime(ts) {
       <div v-if="conversations.length === 0" class="empty">暂无会话，开始一次对话吧</div>
     </div>
 
-    <!-- 底部：设置入口 -->
+    <!-- 底部：收藏笔记本 + 设置入口 -->
     <div class="side-footer" @click.stop>
+      <button class="bm-btn" @click="emit('openBookmarks')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+        </svg>
+        <span>收藏笔记本</span>
+        <span v-if="bookmarkCount" class="bm-count">{{ bookmarkCount }}</span>
+      </button>
       <button class="settings-btn" @click="settingsOpen = !settingsOpen">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
         <span>设置</span>
@@ -181,6 +193,20 @@ function fmtTime(ts) {
             :class="{ on: theme === o.value }"
             @click="pickTheme(o.value)"
           >{{ o.label }}</button>
+        </div>
+        <div class="pop-title pop-title-2">工具与权限</div>
+        <div class="set-row">
+          <span class="set-row-text">
+            <span class="set-row-title">工具执行需审批</span>
+            <span class="set-row-desc">开启后，AI 调用测算/导出类工具前会先请你确认</span>
+          </span>
+          <button
+            class="switch"
+            :class="{ on: requireApproval }"
+            role="switch"
+            :aria-checked="requireApproval"
+            @click="toggleApproval()"
+          ><span class="knob"></span></button>
         </div>
       </div>
     </div>
@@ -230,13 +256,6 @@ function fmtTime(ts) {
   border: none; background: transparent; color: var(--text-dim); cursor: pointer; border-radius: 8px;
 }
 .collapse-btn:hover { background: var(--border-line); color: var(--text); }
-.collapse-btn:hover::after {
-  bottom: auto;
-  top: calc(100% + 6px);
-  left: auto;
-  right: 0;
-  transform: none;
-}
 .collapse-btn svg { width: 24px; height: 24px; }
 
 /* 新建会话 */
@@ -335,11 +354,27 @@ function fmtTime(ts) {
 }
 .empty { padding: 24px 12px; text-align: center; color: var(--text-dim); font-size: 13px; }
 
-/* 底部设置 */
+/* 底部：收藏笔记本 + 设置 */
 .side-footer {
   position: relative;
   padding: 8px 10px;
   border-top: 1px solid var(--border);
+}
+.bm-btn {
+  width: 100%; display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; border: none; border-radius: 9px;
+  background: transparent; color: var(--text-dim); font-size: 13px; cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.bm-btn:hover { background: var(--border-line); color: var(--text); }
+.bm-btn svg { width: 16px; height: 16px; }
+.bm-btn:hover svg { color: var(--warn); }
+.bm-count {
+  margin-left: auto;
+  min-width: 18px; height: 18px; padding: 0 5px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 999px; background: var(--accent); color: #fff;
+  font-size: 11px; font-weight: 600;
 }
 .settings-btn {
   width: 100%; display: flex; align-items: center; gap: 8px;
@@ -385,4 +420,26 @@ function fmtTime(ts) {
   transition: background .15s, color .15s;
 }
 .theme-opt.on { background: var(--panel); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+
+/* 工具与权限：开关行 */
+.pop-title-2 { margin-top: 14px; margin-bottom: 8px; }
+.set-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 4px 2px;
+}
+.set-row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.set-row-title { font-size: 13px; color: var(--text); }
+.set-row-desc { font-size: 11px; color: var(--text-dim); line-height: 1.4; }
+.switch {
+  flex-shrink: 0; width: 38px; height: 22px; border-radius: 999px;
+  border: none; background: var(--border-strong); cursor: pointer;
+  padding: 2px; transition: background .18s;
+}
+.switch.on { background: var(--accent); }
+.switch .knob {
+  display: block; width: 18px; height: 18px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.25);
+  transition: transform .18s;
+}
+.switch.on .knob { transform: translateX(16px); }
 </style>
