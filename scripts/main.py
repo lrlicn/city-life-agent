@@ -20,12 +20,19 @@ from src.prompts import REPLY_MODES, detect_mode_from_question
 from src.rag_build import build_knowledge_base
 
 
-async def main(question: str, mode: str) -> None:
-    # 1. 建库（解析 → 切块 → 入库）
+async def main(question: str, mode: str, rebuild: bool = False) -> None:
+    # 1. 建库（解析 → 切块 → 入库；默认幂等跳过已入库，rebuild=True 先清空重建）
     print("===== 建库 =====")
-    knowledge, store = await build_knowledge_base()
+    knowledge, store = await build_knowledge_base(rebuild=rebuild)
 
     try:
+        if rebuild:
+            # 仅重建：打印当前文档清单后退出，不跑 Agent
+            print("\n===== 重建完成，当前集合文档 =====")
+            for s in await knowledge.list_documents():
+                print(f"  {s.source} | chunks={s.chunk_count}")
+            return
+
         # 2. 原始检索演示
         await demo_search(knowledge)
 
@@ -48,6 +55,11 @@ if __name__ == "__main__":
         default=f"我在{config.CITY}月薪 2 万，到手能拿多少？",
         help="自定义问题（可含「写份报告/简单说」等自然语言触发）",
     )
+    parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="清空并重建知识库（清除历史重复副本 / 源文档变更后强制刷新）",
+    )
     args = parser.parse_args()
 
     # 回答模式优先级：命令行 --mode > 问题自然语言识别 > .env 默认
@@ -56,4 +68,4 @@ if __name__ == "__main__":
     if detected and not args.mode:
         print(f"[模式] 从问题识别为「{detected}」")
 
-    asyncio.run(main(args.ask, mode))
+    asyncio.run(main(args.ask, mode, rebuild=args.rebuild))

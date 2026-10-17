@@ -260,6 +260,48 @@ def _parse_export_output(text: str) -> dict | None:
     return data
 
 
+# 思考块里易泄漏的「元指令复读」行特征：命中即整行丢弃（提示词已约束，此为兼底）
+_META_MARKERS = ("排版规范", "系统提示", "提示词", "全局规则", "按规则",
+                 "元指令", "逐条检查", "格式要求", "回答风格", "知识库使用规范")
+
+# 中文句末切分（保留标点），用于按句过滤元指令分句
+_SENT_SPLIT = re.compile(r"(?<=[。！？；\n])")
+
+# 内部工具函数名 → 中文（避免把 API 名录直接印到用户可见的思考里）
+_REASON_TOOL_NAMES = {
+    "compute_salary": "薪资测算",
+    "compute_rent": "租房测算",
+    "compute_commute": "通勤测算",
+    "compute_mortgage": "房贷测算",
+    "compute_cost_index": "生活成本测算",
+    "search_knowledge": "检索知识库",
+    "ask_user": "向用户澄清",
+    "export_report": "导出报告",
+}
+
+
+def _clean_reasoning(text: str) -> str:
+    """过滤思考文本：按句删除明显在复述系统规则/排版元指令的分句（不误伤同句实质内容），
+    并把内部函数名换成中文。"""
+    if not text:
+        return ""
+    out_lines = []
+    for line in text.splitlines():
+        if not line.strip():
+            out_lines.append(line)
+            continue
+        # 按中文句末标点切句（保留标点），只丢弃命中元指令特征的分句
+        parts = _SENT_SPLIT.split(line)
+        kept = [p for p in parts if not any(mk in p for mk in _META_MARKERS)]
+        out_lines.append("".join(kept))
+    out = "\n".join(out_lines)
+    # 函数名 → 中文（长名先替换，避免 compute_salary 被 compute_ 前缀干扰）
+    for name in sorted(_REASON_TOOL_NAMES, key=len, reverse=True):
+        out = out.replace(name, _REASON_TOOL_NAMES[name])
+    # 压缩多余空行
+    return re.sub(r"\n{3,}", "\n\n", out).strip()
+
+
 async def event_gen_ai(req: ChatRequest):
     """AI SDK 5 Data Stream 协议（SSE）：供前端 @ai-sdk/vue 的 useChat 消费。
 
@@ -316,6 +358,10 @@ async def event_gen_ai(req: ChatRequest):
         stream_parts: list = []
         current_reasoning = None  # 当前正在累积的 reasoning part
         current_text = None       # 当前正在累积的 text part
+        tool_t0: dict[str, float] = {}   # tool_call_id -> 起始时间（分步耗时）
+        reason_seq = 0                    # 思考块序号（每块独立 id，多块不合并）
+        current_reason_id = ""            # 当前思考块的 reasoning part id
+        reason_t0 = 0.0                   # 当前思考块起始时间
         while True:
             parked = None
             async for event in agent.reply_stream(inputs):
@@ -323,6 +369,7 @@ async def event_gen_ai(req: ChatRequest):
                     tool_names[event.tool_call_id] = event.tool_call_name
                     tool_args[event.tool_call_id] = ""
                     tool_outputs[event.tool_call_id] = ""
+                    tool_t0[event.tool_call_id] = time.monotonic()
                     yield f"data: {json.dumps({'type': 'tool-input-start', 'toolCallId': event.tool_call_id, 'toolName': event.tool_call_name}, ensure_ascii=False)}\n\n"
                 elif event.type == EventType.TOOL_CALL_DELTA:
                     if event.tool_call_id in tool_args:
@@ -364,6 +411,7 @@ async def event_gen_ai(req: ChatRequest):
                         "name": name,
                         "input": inp,
                         "output": output,
+                        "ms": int((time.monotonic() - tool_t0.get(tcid, _t0)) * 1000),
                     })
                     # 生成式 UI：compute_salary → data-salary part（前端据此画图）
                     if name == "compute_salary" and output:
@@ -432,17 +480,24 @@ async def event_gen_ai(req: ChatRequest):
                     if current_text is not None and current_text["text"].strip():
                         stream_parts.append(current_text)
                         current_text = None
-                    yield f"data: {json.dumps({'type': 'reasoning-start', 'id': 'reason_1'}, ensure_ascii=False)}\n\n"
+                    # 思考不再逐字实时下发（避免元指令泄漏）：块结束时清洗后整块呈现
+                    reason_seq += 1
+                    current_reason_id = f"reason_{reason_seq}"
+                    reason_t0 = time.monotonic()
                     current_reasoning = {"type": "reasoning", "text": ""}
                 elif event.type == EventType.THINKING_BLOCK_DELTA:
                     reasoning_text += event.delta
                     if current_reasoning is not None:
                         current_reasoning["text"] += event.delta
-                    yield f"data: {json.dumps({'type': 'reasoning-delta', 'id': 'reason_1', 'delta': event.delta}, ensure_ascii=False)}\n\n"
                 elif event.type == EventType.THINKING_BLOCK_END:
-                    yield f"data: {json.dumps({'type': 'reasoning-end', 'id': 'reason_1'}, ensure_ascii=False)}\n\n"
-                    if current_reasoning is not None and current_reasoning["text"].strip():
-                        stream_parts.append(current_reasoning)
+                    cleaned = _clean_reasoning(current_reasoning["text"]) if current_reasoning else ""
+                    dur_ms = int((time.monotonic() - reason_t0) * 1000) if reason_t0 else 0
+                    if cleaned:
+                        rid = current_reason_id or "reason_1"
+                        yield f"data: {json.dumps({'type': 'reasoning-start', 'id': rid}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'type': 'reasoning-delta', 'id': rid, 'delta': cleaned}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'type': 'reasoning-end', 'id': rid}, ensure_ascii=False)}\n\n"
+                        stream_parts.append({"type": "reasoning", "text": cleaned, "ms": dur_ms})
                     current_reasoning = None
                 elif event.type == EventType.TEXT_BLOCK_DELTA:
                     if not text_started:

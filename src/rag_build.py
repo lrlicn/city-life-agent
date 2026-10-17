@@ -39,8 +39,12 @@ def make_embedding_model() -> OpenAIEmbeddingModel:
     )
 
 
-async def build_knowledge_base() -> tuple[KnowledgeBase, QdrantStore]:
+async def build_knowledge_base(rebuild: bool = False) -> tuple[KnowledgeBase, QdrantStore]:
     """读取 data/docs/{CITY}/ 下所有文档，解析切块后入库，返回 (knowledge, store)。
+
+    幂等：默认按文件名跳过集合中已存在的文档，避免每次启动/运行重复入库、累积重复副本。
+    rebuild=True：先删除集合中全部历史文档（含旧版遗留的重复副本）再重新入库，
+                  也用于源文档内容变更后强制刷新。
 
     store 的连接已打开，调用方需在 finally 中 await store.__aexit__(...)。
     """
@@ -69,10 +73,29 @@ async def build_knowledge_base() -> tuple[KnowledgeBase, QdrantStore]:
         collection="agent-rag-kb",
     )
 
+    # 已入库文档：按文件名归组其 document_id（用于幂等跳过 / 重建清空）
+    existing: dict[str, list[str]] = {}
+    for s in await knowledge.list_documents():
+        name = os.path.basename(getattr(s, "source", "") or "")
+        if name:
+            existing.setdefault(name, []).append(s.document_id)
+
+    if rebuild and existing:
+        removed = 0
+        for doc_ids in existing.values():
+            for doc_id in doc_ids:
+                await knowledge.delete_document(doc_id)
+                removed += 1
+        print(f"  ↻ 重建：已清空 {removed} 个历史文档（含重复副本）")
+        existing.clear()
+
     # 遍历 data/docs/{CITY}/ 下的 .md/.txt 文件，逐篇入库（每篇一个 document_id）
     total = 0
     for filename in os.listdir(DATA_DIR):
         if not filename.lower().endswith((".md", ".txt", ".csv", ".html")):
+            continue
+        if filename in existing:
+            print(f"  ↳ 跳过已入库 {filename}（集合内 {len(existing[filename])} 份）")
             continue
         path = os.path.join(DATA_DIR, filename)
         sections = await parser.parse(file=path, filename=filename)
@@ -83,6 +106,6 @@ async def build_knowledge_base() -> tuple[KnowledgeBase, QdrantStore]:
         )
         total += len(chunks)
         print(f"  ↳ 已入库 {filename} → {doc_id}（{len(chunks)} chunk）")
-    print(f"解析+切块完成，共 {total} 个 Chunk")
+    print(f"解析+切块完成，本次新入库 {total} 个 Chunk")
 
     return knowledge, store

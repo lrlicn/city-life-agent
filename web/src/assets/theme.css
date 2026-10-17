@@ -56,6 +56,18 @@
   --err-border: #5b2a2e;
   --danger: #7f1d1d;
 
+  /* 侧栏当前会话激活态（深/浅各自调校，明显区别于 hover） */
+  --conv-active-bg: rgba(90, 249, 203, 0.14);
+  --conv-active-bg-hover: rgba(90, 249, 203, 0.20);
+  --conv-active-text: #5AF9CB;
+  /* 侧栏会话 hover：中性提亮，比侧栏底 --panel-deep 明显一档 */
+  --conv-hover-bg: #1b2942;
+
+  /* 用户气泡：深色不用霓虹亮薄荷（避免大色块晃眼），改用沉稳祖母绿 + 近白文字 */
+  --bubble-user-1: #138d6e;
+  --bubble-user-2: #0d6a53;
+  --bubble-user-text: #eafff8;
+
   /* 消息区底部渐隐 */
   --fade: rgba(12, 18, 32, 0.85);
 }
@@ -113,6 +125,18 @@
   --err-text: #b91c1c;
   --err-border: #f5c2c2;
   --danger: #b91c1c;
+
+  /* 侧栏当前会话激活态（深/浅各自调校，明显区别于 hover） */
+  --conv-active-bg: rgba(14, 158, 121, 0.12);
+  --conv-active-bg-hover: rgba(14, 158, 121, 0.17);
+  --conv-active-text: #0A7F60;
+  /* 侧栏会话 hover：中性提亮，比侧栏底 --panel-deep 明显一档 */
+  --conv-hover-bg: #dcefe4;
+
+  /* 用户气泡：浅色白底上祖母绿渐变不刺眼，保留品牌观感 */
+  --bubble-user-1: #12b98d;
+  --bubble-user-2: #0A7F60;
+  --bubble-user-text: #ffffff;
 
   /* 消息区底部渐隐 */
   --fade: rgba(255, 255, 255, 0.85);

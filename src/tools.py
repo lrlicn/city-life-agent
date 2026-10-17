@@ -10,6 +10,7 @@ Phase 3 升级点：
 - 估算区间 + 口径假设：输出当前参数到手值 + 申报/未申报专项扣除的区间
 """
 
+import math
 import re
 import time
 from pathlib import Path
@@ -162,20 +163,35 @@ def compute_rent(
 
 
 # 通勤演示参数（非官方，仅教学用）：
-#   subway_start/subway_per_km = 地铁起步价与每公里加价（简化线性计价）
-#   taxi_start/taxi_per_km     = 出租起步价与里程费
+#   subway_*  = 地铁阶梯票价：起步价 subway_base 含 subway_base_km 公里，
+#               之后每满 subway_step_km 公里加 subway_step_fare 元（近似真实里程计价，短途不再被线性高估）
+#   taxi_start/taxi_per_km     = 出租起步价与里程费（打车本就是起步+按里程）
 #   drive_cost_per_km          = 自驾每公里综合成本（油/电+磨损）
 #   parking_monthly            = 办公地月停车费分摊；ebike_monthly = 电动车充电+磨损
 COMMUTE_DEFAULTS = {
-    "上海": {"subway_start": 3.0, "subway_per_km": 0.55, "taxi_start": 14.0, "taxi_per_km": 2.7,
+    "上海": {"subway_base": 3.0, "subway_base_km": 6, "subway_step_km": 10, "subway_step_fare": 1.0,
+             "taxi_start": 14.0, "taxi_per_km": 2.7,
              "drive_cost_per_km": 0.85, "parking_monthly": 800.0, "ebike_monthly": 60.0},
-    "北京": {"subway_start": 3.0, "subway_per_km": 0.50, "taxi_start": 13.0, "taxi_per_km": 2.3,
+    "北京": {"subway_base": 3.0, "subway_base_km": 6, "subway_step_km": 10, "subway_step_fare": 1.0,
+             "taxi_start": 13.0, "taxi_per_km": 2.3,
              "drive_cost_per_km": 0.90, "parking_monthly": 900.0, "ebike_monthly": 55.0},
-    "深圳": {"subway_start": 2.0, "subway_per_km": 0.50, "taxi_start": 12.5, "taxi_per_km": 2.4,
+    "深圳": {"subway_base": 2.0, "subway_base_km": 4, "subway_step_km": 7, "subway_step_fare": 1.0,
+             "taxi_start": 12.5, "taxi_per_km": 2.4,
              "drive_cost_per_km": 0.80, "parking_monthly": 700.0, "ebike_monthly": 60.0},
-    "广州": {"subway_start": 2.0, "subway_per_km": 0.45, "taxi_start": 12.0, "taxi_per_km": 2.6,
+    "广州": {"subway_base": 2.0, "subway_base_km": 4, "subway_step_km": 6, "subway_step_fare": 1.0,
+             "taxi_start": 12.0, "taxi_per_km": 2.6,
              "drive_cost_per_km": 0.75, "parking_monthly": 600.0, "ebike_monthly": 60.0},
 }
+
+
+def _tiered_fare(base: float, base_km: float, step_km: float, step_fare: float, km: float) -> float:
+    """地铁阶梯票价：起步价含 base_km 公里，超出后每满 step_km 公里加 step_fare 元（不足一档按一档计）。
+
+    相比「起步 + 每公里线性」，阶梯计价更贴近真实地铁票价规则，避免中短途被系统性高估。
+    """
+    if km <= base_km:
+        return base
+    return base + math.ceil((km - base_km) / step_km) * step_fare
 
 
 def compute_commute(
@@ -200,7 +216,8 @@ def compute_commute(
     c = COMMUTE_DEFAULTS[city]
     trips = days_per_month * 2  # 每月往返总次数（双程）
 
-    subway_once = c["subway_start"] + c["subway_per_km"] * one_way_km
+    subway_once = _tiered_fare(c["subway_base"], c["subway_base_km"],
+                               c["subway_step_km"], c["subway_step_fare"], one_way_km)
     subway = subway_once * trips
     ebike = c["ebike_monthly"]                      # 充电+磨损按月折算，与距离弱相关（演示简化）
     drive = one_way_km * 2 * days_per_month * c["drive_cost_per_km"] + c["parking_monthly"]
@@ -217,7 +234,8 @@ def compute_commute(
         f"  自驾 ≈ {drive:.0f} 元/月（能耗+停车 {c['parking_monthly']:.0f} 元/月）\n"
         f"  打车 ≈ {taxi:.0f} 元/月（单程 {taxi_once:.0f} 元）\n"
         f"  最省 ≈ {cheapest_name} 约 {cheapest_val:.0f} 元/月\n"
-        f"  口径：各计价为演示简化参数（未计阶梯票价/拼车/拥堵费）；"
+        f"  口径：地铁按里程阶梯计价（演示近似：起步含里程+每档递增）；"
+        f"打车含起步+里程；未计换乘优惠/累计折扣/拼车/拥堵费；"
         f"电动车未计头盔保险；实际以当地运价与通勤路线为准。"
     )
 

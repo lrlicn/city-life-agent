@@ -1,16 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <defs>
-    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#4f6ef7;stop-opacity:1" />
-      <stop offset="100%" style="stop-color:#3b5bdb;stop-opacity:1" />
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" style="stop-color:#12B98D;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#0A7F60;stop-opacity:1" />
     </linearGradient>
   </defs>
   <rect width="64" height="64" rx="14" fill="url(#bg)"/>
-  <!-- 房子轮廓 -->
-  <path d="M16 32 L32 18 L48 32" stroke="white" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M20 32 V46 H44 V32" stroke="white" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-  <!-- 计算器/账本元素 -->
-  <rect x="26" y="36" width="12" height="10" rx="2" fill="white" opacity="0.9"/>
-  <line x1="29" y1="39" x2="35" y2="39" stroke="#4f6ef7" stroke-width="1.5" stroke-linecap="round"/>
-  <line x1="29" y1="42" x2="35" y2="42" stroke="#4f6ef7" stroke-width="1.5" stroke-linecap="round"/>
+  <!-- 屋顶（加粗描边，小尺寸下依旧锐利） -->
+  <path d="M14 31 L32 16 L50 31" stroke="#ffffff" stroke-width="4.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- 房体 -->
+  <path d="M19 30 V47 H45 V30" stroke="#ffffff" stroke-width="4.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- 门/账本块：实心高对比，替代易发糊的微型线条 -->
+  <rect x="27" y="35" width="10" height="12" rx="2" fill="#ffffff"/>
 </svg>

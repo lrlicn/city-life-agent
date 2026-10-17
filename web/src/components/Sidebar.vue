@@ -32,9 +32,9 @@ async function checkOverflow() {
 
     const overflow = el.scrollWidth - el.clientWidth
     if (overflow > 4) {
-      // 一份文字的完整宽度，加上两段之间的间距(2rem=32px)
+      // 一份文字的完整宽度，加上两段之间的间距(1rem=16px)
       const textWidth = inner.scrollWidth
-      const gap = 32
+      const gap = 16
       el.style.setProperty('--scroll-distance', (textWidth + gap) + 'px')
       // 滚动速度恒定：约每秒60px，最少3秒
       const duration = Math.max(3, (textWidth + gap) / 60)
@@ -244,7 +244,7 @@ function fmtTime(ts) {
   width: 28px; height: 28px; flex-shrink: 0;
   display: flex; align-items: center; justify-content: center;
   font-size: 15px; color: #fff; border-radius: 8px;
-  background: linear-gradient(135deg, #4f6ef7, #7c5cfc);
+  background: linear-gradient(135deg, #12B98D, #0A7F60);
 }
 .brand-name {
   flex: 1; font-size: 15px; font-weight: 600; color: var(--text);
@@ -289,8 +289,19 @@ function fmtTime(ts) {
   flex-shrink: 0;
   overflow: hidden;
 }
-.conv-item:hover { background: var(--panel-soft); }
-.conv-item.active { background: var(--border-line); }
+.conv-item:hover { background: var(--conv-hover-bg); }
+.conv-item.active { background: var(--conv-active-bg); }
+.conv-item.active:hover { background: var(--conv-active-bg-hover); }
+/* 左侧薄荷指示条：强化“当前会话”识别 */
+.conv-item.active::before {
+  content: ''; position: absolute; left: 0; top: 50%;
+  transform: translateY(-50%);
+  width: 3px; height: 60%; border-radius: 0 3px 3px 0;
+  background: var(--accent);
+}
+.conv-item.active .conv-title {
+  color: var(--conv-active-text); font-weight: 600;
+}
 .conv-title {
   flex: 1; font-size: 13px; color: var(--text);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -311,10 +322,10 @@ function fmtTime(ts) {
 .conv-item:hover .conv-title.is-overflow .conv-title-inner {
   animation: marquee 6s linear infinite;
 }
-/* hover 时复制一份文字，实现无缝衔接 */
+/* hover 时复制一份文字，实现无缝衔接：间距加在副本「前面」，让原文与副本之间留出空隙 */
 .conv-item:hover .conv-title.is-overflow .conv-title-inner::after {
   content: attr(data-text);
-  margin-right: 2rem;
+  margin-left: 1rem;
 }
 @keyframes marquee {
   from { transform: translateX(0); }
@@ -350,7 +361,7 @@ function fmtTime(ts) {
 .cact svg { width: 16px; height: 16px; }
 .rename-input {
   flex: 1; padding: 4px 8px; border: 1px solid var(--accent); border-radius: 6px;
-  background: var(--bg); color: var(--text); font-size: 13px; outline: none;
+  background: var(--panel); color: var(--text); font-size: 13px; outline: none;
 }
 .empty { padding: 24px 12px; text-align: center; color: var(--text-dim); font-size: 13px; }
 
@@ -419,7 +430,7 @@ function fmtTime(ts) {
   background: transparent; color: var(--text-dim); font-size: 12px; cursor: pointer;
   transition: background .15s, color .15s;
 }
-.theme-opt.on { background: var(--panel); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+.theme-opt.on { background: var(--panel); color: var(--accent-deep); font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
 
 /* 工具与权限：开关行 */
 .pop-title-2 { margin-top: 14px; margin-bottom: 8px; }

@@ -11,6 +11,7 @@ import CostIndexChart from './CostIndexChart.vue'
 import ThemeToggle from './ThemeToggle.vue'
 import Sidebar from './Sidebar.vue'
 import BookmarksPanel from './BookmarksPanel.vue'
+import ReasoningPanel from './ReasoningPanel.vue'
 import { useSettings } from '../composables/useSettings.js'
 
 // 回答模式：brief / standard / report
@@ -338,7 +339,7 @@ function agentParts(m) {
   return (m.parts || [])
     .map((p, i) => {
       if (p.type === 'text') return { key: i, kind: 'text', text: p.text || '' }
-      if (p.type === 'reasoning') return { key: i, kind: 'reasoning', text: p.text || '' }
+      if (p.type === 'reasoning') return { key: i, kind: 'reasoning', text: p.text || '', ms: p.ms }
       if (p.type === 'data-salary') return { key: i, kind: 'chart', chart: 'salary', data: p.data }
       if (p.type === 'data-rent') return { key: i, kind: 'chart', chart: 'rent', data: p.data }
       if (p.type === 'data-commute') return { key: i, kind: 'chart', chart: 'commute', data: p.data }
@@ -356,6 +357,7 @@ function agentParts(m) {
           input: p.input,
           output: p.output,
           done: true,
+          ms: p.ms,
         }
       }
       // AI SDK 流式输出的 tool UI part
@@ -434,6 +436,14 @@ function streamParts(m) {
   const interactions = parts.filter(p => p.kind === 'interaction')
   const exports = parts.filter(p => p.kind === 'export')
   return { processes, texts, charts, interactions, exports }
+}
+
+// 「思考中」态：正在流式且尚未产出任何正文 → 头部显 spinner + 微光；
+// 一旦最终回答正文开始输出，就切回静态「思考过程」（避免误导）
+function isThinkingActive(m) {
+  if (status.value !== 'streaming') return false
+  const sp = streamParts(m)
+  return !sp.texts.some(t => t.text && t.text.trim())
 }
 
 function toolsOf(m) {
@@ -756,16 +766,39 @@ async function regenerate(m) {
   if (!q) return
   const ok = await truncateFromMessage(m.id)
   if (!ok) {
-    // 无法截断时退回旧行为：填回输入框让用户自行重发
-    input.value = q
-    nextTick(() => {
-      const ta = document.querySelector('.composer textarea')
-      if (ta) ta.focus()
-    })
+    // 无法截断（多半后端未启动）：仅提示，不改动输入框、不抢焦点，等恢复后重试
+    showToast('网络连接异常，暂时无法重新生成，请稍后重试')
     return
   }
   sendMessage({ text: q })
 }
+
+// 把底层 error 映射为本地化、可操作的人话（原始串只进 console）
+const friendlyError = computed(() => {
+  const raw = (error.value && (error.value.message || String(error.value))) || ''
+  const low = raw.toLowerCase()
+  if (/failed to fetch|network|econnrefused|err_connection|load failed|networkerror|offline/.test(low))
+    return '网络连接异常，暂时无法获取回复，请检查网络后重试。'
+  if (/abort/.test(low)) return '已停止生成。'
+  if (/5\d\d|internal|server|bad gateway/.test(low)) return '服务暂时不可用，请稍后重试。'
+  return '抱歉，这一轮回复生成失败，请点击重试。'
+})
+
+// 重试：定位最后一条 user 问题，截断该轮后重发（复用截断+重发逻辑）
+async function retryLastTurn() {
+  if (busy.value) return
+  const ms = messages.value
+  let uIdx = -1
+  for (let i = ms.length - 1; i >= 0; i--) { if (ms[i].role === 'user') { uIdx = i; break } }
+  if (uIdx < 0) return
+  const q = userText(ms[uIdx])
+  if (!q) return
+  await truncateFromMessage(ms[uIdx].id)
+  sendMessage({ text: q })
+}
+
+// 错误发生时把原始技术串落 console，便于排查（不暴露给用户）
+watch(error, (e) => { if (e) console.error('[chat] 回复请求失败：', e) })
 
 // 开始编辑用户消息
 function startEdit(m) {
@@ -925,7 +958,14 @@ onBeforeUnmount(() => {
 
         <div v-else class="row agent-row">
           <div class="avatar a">
-            <img src="/ai-avatar.svg" alt="AI" style="width:100%;height:100%;border-radius:9px"/>
+            <svg class="ai-svg" viewBox="0 0 64 64" aria-label="AI">
+              <line x1="32" y1="19" x2="32" y2="12" stroke="#ffffff" stroke-width="3.2" stroke-linecap="round"/>
+              <circle cx="32" cy="10.5" r="3.2" fill="#ffffff"/>
+              <rect x="14" y="19" width="36" height="29" rx="6" fill="#ffffff"/>
+              <circle class="ai-eye" cx="25" cy="32" r="3.6" fill="#0A7F60"/>
+              <circle class="ai-eye" cx="39" cy="32" r="3.6" fill="#0A7F60"/>
+              <path d="M25 41 Q32 45 39 41" stroke="#0A7F60" stroke-width="3" fill="none" stroke-linecap="round"/>
+            </svg>
           </div>
           <div class="agent-body">
             <!-- 思考中占位：尚未产出任何内容时的友好提示 -->
@@ -934,52 +974,12 @@ onBeforeUnmount(() => {
             <!-- 当前正在生成的消息：与历史视图同构——过程折叠面板在顶部（生成中默认展开），
                  正文流只渲染 text + chart，工具/思考不会再插进回答中间 -->
             <template v-if="isLastAssistantMsg(m) && status === 'streaming'">
-              <details v-if="streamParts(m).processes.length > 0" class="reasoning history-reasoning" open>
-                <summary>
-                  <span class="r-icon">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                      <path d="M9 18h6"/>
-                      <path d="M10 22h4"/>
-                      <path d="M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.4 1 2.3h6c0-.9.4-1.8 1-2.3A7 7 0 0 0 12 2z"/>
-                    </svg>
-                  </span>
-                  <span class="r-label">思考过程</span>
-                  <span class="r-count">{{ streamParts(m).processes.length }}</span>
-                  <span class="r-toggle">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                      <path d="M9 18l6-6-6-6"/>
-                    </svg>
-                  </span>
-                  <span class="r-duration">{{ durationText(m) }}</span>
-                </summary>
-                <div class="r-body">
-                  <div v-for="(proc, i) in streamParts(m).processes" :key="'sp-' + proc.key" class="proc-item">
-                    <template v-if="proc.kind === 'reasoning'">
-                      <div class="proc-label">💭 思考</div>
-                      <div class="proc-text">{{ proc.text }}</div>
-                    </template>
-                    <template v-else-if="proc.kind === 'tool'">
-                      <details class="proc-tool">
-                        <summary>
-                          <span class="proc-label">⚙ {{ proc.running ? '正在调用工具…' : proc.name }}</span>
-                          <span class="proc-status" :class="{ run: proc.running }">{{ proc.running ? '进行中…' : '完成' }}</span>
-                          <span v-if="!proc.running" class="proc-toggle">›</span>
-                        </summary>
-                        <div v-if="!proc.running" class="proc-detail">
-                          <div v-if="proc.input && Object.keys(proc.input).length" class="td">
-                            <span class="td-label">输入参数</span>
-                            <pre class="td-pre">{{ fmt(proc.input) }}</pre>
-                          </div>
-                          <div v-if="proc.output" class="td">
-                            <span class="td-label">返回结果</span>
-                            <pre class="td-pre">{{ fmt(proc.output) }}</pre>
-                          </div>
-                        </div>
-                      </details>
-                    </template>
-                  </div>
-                </div>
-              </details>
+              <ReasoningPanel
+                :processes="streamParts(m).processes"
+                :streaming="true"
+                :active="isThinkingActive(m)"
+                :duration="durationText(m)"
+              />
               <div v-if="streamParts(m).processes.length > 0" class="history-divider"></div>
               <!-- 正文文字流（在上，随生成向下生长） -->
               <div v-for="p in streamParts(m).texts" :key="p.key" class="markdown" v-html="md(p.text)"></div>
@@ -1041,52 +1041,10 @@ onBeforeUnmount(() => {
             <!-- 历史消息：思考过程折叠面板在最上面，然后分隔线，然后是最终回复 -->
             <template v-else>
               <!-- 总的思考过程折叠面板（在最上面） -->
-              <details v-if="historyParts(m).processes.length > 0" class="reasoning history-reasoning">
-                <summary>
-                  <span class="r-icon">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                      <path d="M9 18h6"/>
-                      <path d="M10 22h4"/>
-                      <path d="M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.4 1 2.3h6c0-.9.4-1.8 1-2.3A7 7 0 0 0 12 2z"/>
-                    </svg>
-                  </span>
-                  <span class="r-label">思考过程</span>
-                  <span class="r-count">{{ historyParts(m).processes.length }}</span>
-                  <span class="r-toggle">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                      <path d="M9 18l6-6-6-6"/>
-                    </svg>
-                  </span>
-                  <span class="r-duration">{{ durationText(m) }}</span>
-                </summary>
-                <div class="r-body">
-                  <div v-for="(proc, i) in historyParts(m).processes" :key="'proc-' + i" class="proc-item">
-                    <template v-if="proc.kind === 'reasoning'">
-                      <div class="proc-label">💭 思考</div>
-                      <div class="proc-text">{{ proc.text }}</div>
-                    </template>
-                    <template v-else-if="proc.kind === 'tool'">
-                      <details class="proc-tool">
-                        <summary>
-                          <span class="proc-label">⚙ {{ proc.name }}</span>
-                          <span class="proc-status">完成</span>
-                          <span class="proc-toggle">›</span>
-                        </summary>
-                        <div class="proc-detail">
-                          <div v-if="proc.input && Object.keys(proc.input).length" class="td">
-                            <span class="td-label">输入参数</span>
-                            <pre class="td-pre">{{ fmt(proc.input) }}</pre>
-                          </div>
-                          <div v-if="proc.output" class="td">
-                            <span class="td-label">返回结果</span>
-                            <pre class="td-pre">{{ proc.output }}</pre>
-                          </div>
-                        </div>
-                      </details>
-                    </template>
-                  </div>
-                </div>
-              </details>
+              <ReasoningPanel
+                :processes="historyParts(m).processes"
+                :duration="durationText(m)"
+              />
               <!-- 分隔线 -->
               <div v-if="historyParts(m).processes.length > 0" class="history-divider"></div>
               <!-- 正文文字（在上） -->
@@ -1138,8 +1096,15 @@ onBeforeUnmount(() => {
                 </a>
               </div>
             </template>
+
+            <!-- 生成中：助手列内联「停止」按钮，覆盖思考占位(submitted)与流式(streaming)两阶段 -->
+            <button v-if="isLastAssistantMsg(m) && busy" class="inline-stop" @click="stop" aria-label="停止生成">
+              <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+              停止生成
+            </button>
           </div>
-          <div v-if="!isLastAssistantMsg(m) || status !== 'streaming'" class="msg-meta agent-meta">
+          <!-- 操作栏/时间戳只在回答「完整结束后」浮现：生成中（submitted/streaming）不显示 -->
+          <div v-if="!isLastAssistantMsg(m) || !busy" class="msg-meta agent-meta">
             <span class="m-acts">
               <button class="m-act" :class="{ ok: copiedId === m.id }" @click="copyMsg(m)" data-tip="复制">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
@@ -1163,6 +1128,34 @@ onBeforeUnmount(() => {
           </div>
         </div>
       </template>
+
+      <!-- 请求失败：就地内联错误卡 + 重试（替掉原来的全局底部红条） -->
+      <div v-if="status === 'error'" class="row agent-row">
+        <div class="avatar a">
+          <svg class="ai-svg" viewBox="0 0 64 64" aria-label="AI">
+            <line x1="32" y1="19" x2="32" y2="12" stroke="#ffffff" stroke-width="3.2" stroke-linecap="round"/>
+            <circle cx="32" cy="10.5" r="3.2" fill="#ffffff"/>
+            <rect x="14" y="19" width="36" height="29" rx="6" fill="#ffffff"/>
+            <circle cx="25" cy="32" r="3.6" fill="#0A7F60"/>
+            <circle cx="39" cy="32" r="3.6" fill="#0A7F60"/>
+            <path d="M25 41 Q32 45 39 41" stroke="#0A7F60" stroke-width="3" fill="none" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div class="agent-body">
+          <div class="err-card">
+            <span class="err-ic">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            </span>
+            <div class="err-body">
+              <div class="err-msg">{{ friendlyError }}</div>
+              <button class="err-retry" :disabled="busy" @click="retryLastTurn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
+                重试
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- 左侧轮次导航条：每轮对话一条短横线，hover 延长+预览，点击定位 -->
@@ -1183,9 +1176,6 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </nav>
-
-    <!-- 错误条 -->
-    <div v-if="error" class="errorbar">出错：{{ error.message || error }}</div>
 
     <!-- 输入区：大胶囊输入条 -->
     <div class="inputbar">
@@ -1730,9 +1720,36 @@ header h1 {
   flex-shrink: 0;
 }
 .avatar.a {
-  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  background: linear-gradient(135deg, #12B98D, #0A7F60);
   color: var(--text-on-accent);
   font-size: 14px;
+}
+.ai-svg { width: 100%; height: 100%; }
+/* 眨眼：hover 头像时眼睛纵向压扁再复原，transform-origin 锁到各自中心 */
+.avatar.a .ai-eye {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.avatar.a:hover .ai-eye {
+  /* 主周期 8.4s = 3 段 2.8s：单眨 → 单眨 → 连眨两下，制造偶发感 */
+  animation: ai-blink 8.4s ease-in-out infinite;
+}
+@keyframes ai-blink {
+  /* 第 1 下（t=0） */
+  0%     { transform: scaleY(1); }
+  1.7%   { transform: scaleY(0.08); }
+  3.3%   { transform: scaleY(1); }
+  /* 第 2 下（t=2.8s）：连眨两下 */
+  33.3%  { transform: scaleY(1); }
+  35%    { transform: scaleY(0.08); }
+  36.7%  { transform: scaleY(1); }
+  38.3%  { transform: scaleY(0.08); }
+  40%    { transform: scaleY(1); }
+  /* 第 3 下（t=5.6s） */
+  66.7%  { transform: scaleY(1); }
+  68.3%  { transform: scaleY(0.08); }
+  70%    { transform: scaleY(1); }
+  100%   { transform: scaleY(1); }
 }
 .bubble {
   max-width: 76%;
@@ -1744,8 +1761,8 @@ header h1 {
   word-break: break-word;
 }
 .bubble.user {
-  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
-  color: #fff;
+  background: linear-gradient(135deg, var(--bubble-user-1), var(--bubble-user-2));
+  color: var(--bubble-user-text);
   border-top-right-radius: 4px;
 }
 /* 用户气泡里的 Markdown：预渲染 HTML 后改用正常流排版，
@@ -1892,21 +1909,6 @@ header h1 {
   border-radius: 0 8px 8px 0;
 }
 .agent-body { flex: 1; min-width: 0; }
-
-/* 工具明细内联块（.td 系列，被历史/流式的 .proc-detail 复用） */
-.td { margin-bottom: 6px; }
-.td:last-child { margin-bottom: 0; }
-.td-label { color: var(--text-dim); font-size: 11px; display: block; margin-bottom: 2px; }
-.td-pre {
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--text-2);
-  background: var(--panel-deep);
-  padding: 6px 8px;
-  border-radius: 6px;
-  font-size: 13px;
-  margin: 0;
-}
 
 /* 图表 */
 .chart-wrap {
@@ -2104,65 +2106,7 @@ header h1 {
 .export-card .ex-btn svg { width: 13px; height: 13px; }
 
 
-/* 思考过程折叠区 */
-.reasoning { margin-bottom: 4px; }
-.reasoning summary {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  list-style: none;
-  cursor: pointer;
-  font-size: 13px;
-  color: var(--text-dim);
-  padding: 5px 8px;
-  margin: 0 -8px;
-  border-radius: 8px;
-  user-select: none;
-}
-.reasoning summary::-webkit-details-marker { display: none; }
-.reasoning summary:hover { background: var(--panel-hover2); }
-.reasoning .r-icon {
-  width: 14px;
-  height: 14px;
-  color: var(--text-faint);
-  display: inline-flex;
-  flex-shrink: 0;
-}
-.reasoning .r-icon svg { width: 100%; height: 100%; }
-.reasoning .r-label { color: var(--text-dim); }
-.reasoning .r-duration {
-  color: var(--text-faint);
-  font-size: 12px;
-  margin-left: auto;
-  margin-right: 8px;
-}
-.reasoning .r-toggle {
-  color: var(--text-faint);
-  width: 14px;
-  height: 14px;
-  display: inline-flex;
-  transition: transform 0.15s;
-}
-.reasoning .r-toggle svg { width: 100%; height: 100%; }
-.reasoning details[open] .r-toggle { transform: rotate(90deg); }
-.reasoning .r-body {
-  font-size: 13px;
-  line-height: 1.6;
-  color: var(--text-muted);
-  white-space: pre-wrap;
-  word-break: break-word;
-  background: var(--panel-soft);
-  border-radius: 8px;
-  padding: 8px 12px;
-  margin-top: 4px;
-  max-height: 200px;
-  overflow-y: auto;
-}
-
-/* 历史消息：总的思考过程折叠面板 */
-.history-reasoning {
-  margin-bottom: 8px;
-}
+/* 历史消息：过程面板与正文之间的分隔线、正文间距 */
 .history-divider {
   height: 1px;
   background: var(--border-line, #e5e7eb);
@@ -2181,83 +2125,6 @@ header h1 {
 .history-text h2,
 .history-text h3 {
   margin: 16px 0 8px;
-}
-.history-reasoning .r-count {
-  color: var(--text-faint, #9ca3af);
-  font-size: 12px;
-  margin-left: 2px;
-}
-.history-reasoning .r-body {
-  max-height: none;
-  overflow-y: visible;
-  background: transparent;
-  padding: 4px 0 0 0;
-  margin-top: 0;
-}
-.history-reasoning .proc-item {
-  padding: 6px 0;
-  border-bottom: 1px solid var(--border-line, #f0f0f0);
-}
-.history-reasoning .proc-item:last-child {
-  border-bottom: none;
-}
-.history-reasoning .proc-label {
-  font-size: 12px;
-  color: var(--text-dim);
-  margin-bottom: 2px;
-}
-.history-reasoning .proc-text {
-  font-size: 13px;
-  color: var(--text-2);
-  line-height: 1.5;
-}
-.proc-tool {
-  margin: 4px 0;
-}
-.proc-tool summary {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-  padding: 4px 0;
-  list-style: none;
-}
-.proc-tool summary::-webkit-details-marker { display: none; }
-.proc-status {
-  color: var(--ok, #10b981);
-  font-size: 12px;
-}
-.proc-status.run {
-  color: var(--warn, #f59e0b);
-}
-.proc-toggle {
-  color: var(--text-faint, #9ca3af);
-  font-size: 14px;
-  transition: transform 0.15s;
-}
-.proc-tool[open] .proc-toggle {
-  transform: rotate(90deg);
-}
-.proc-detail {
-  padding: 4px 0 8px 20px;
-}
-.proc-detail .td {
-  margin-bottom: 8px;
-}
-.proc-detail .td-label {
-  font-size: 11px;
-  color: var(--text-dim);
-  margin-bottom: 2px;
-}
-.proc-detail .td-pre {
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-size: 12px;
-  color: var(--text-2);
-  background: var(--panel-soft, #f5f5f5);
-  padding: 6px 8px;
-  border-radius: 6px;
-  margin: 0;
 }
 
 /* 思考中提示 */
@@ -2283,14 +2150,34 @@ header h1 {
   50% { opacity: 1; }
 }
 
-/* 错误条 */
-.errorbar {
+/* 请求失败：内联错误卡 */
+.err-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 12px;
   background: var(--err-bg);
-  color: var(--err-text);
-  padding: 10px 24px;
-  font-size: 13px;
-  border-top: 1px solid var(--err-border);
+  border: 1px solid var(--err-border);
+  max-width: 560px;
 }
+.err-ic { flex-shrink: 0; width: 18px; height: 18px; color: var(--err-text); display: inline-flex; margin-top: 1px; }
+.err-ic svg { width: 100%; height: 100%; }
+.err-body { min-width: 0; }
+.err-msg { font-size: 13px; line-height: 1.6; color: var(--err-text); }
+.err-retry {
+  display: inline-flex; align-items: center; gap: 5px;
+  margin-top: 9px; padding: 5px 12px;
+  font-size: 12.5px; font-weight: 500; line-height: 1;
+  color: var(--err-text);
+  background: transparent;
+  border: 1px solid var(--err-border);
+  border-radius: 8px; cursor: pointer;
+  transition: background 0.15s, opacity 0.15s;
+}
+.err-retry svg { width: 13px; height: 13px; }
+.err-retry:hover:not(:disabled) { background: rgba(127, 127, 127, 0.14); }
+.err-retry:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* 输入区：大胶囊输入条（首屏居中态下额外挂胶囊建议在下方） */
 .inputbar {
@@ -2496,4 +2383,17 @@ header h1 {
   0% { transform: scale(1); opacity: 0.55; }
   100% { transform: scale(1.4); opacity: 0; }
 }
+/* 生成中：助手列内联停止胶囊按钮 */
+.inline-stop {
+  display: inline-flex; align-items: center; gap: 6px;
+  margin-top: 12px; padding: 7px 14px;
+  font-size: 12.5px; font-weight: 500; line-height: 1;
+  color: var(--text-dim);
+  background: var(--panel-soft-trans, var(--panel-soft));
+  border: 1px solid var(--border-strong);
+  border-radius: 999px; cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.inline-stop svg { width: 11px; height: 11px; }
+.inline-stop:hover { color: var(--err); border-color: var(--err); background: var(--err-bg); }
 </style>
