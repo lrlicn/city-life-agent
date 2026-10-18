@@ -15,10 +15,26 @@ import re
 import time
 from pathlib import Path
 
+from agentscope.message import TextBlock
+from agentscope.tool import ToolChunk
+
 from src import interaction
 
 # 报告导出落盘目录：<项目根>/data/exports（首次导出自动创建；PDF 由前端「打印」生成，后端只写 Markdown）
 EXPORT_DIR = Path(__file__).resolve().parent.parent / "data" / "exports"
+
+
+def _ui_chunk(text: str, kind: str | None = None, data: dict | None = None) -> ToolChunk:
+    """把工具结果包装成 ToolChunk：content 仍是给大模型读的人类可读文本，
+    已算好的结构化数字放进 metadata.ui（kind→前端 data-{kind} part，data→图表数据）。
+
+    这样后端直接读 event.metadata 下发，不必再对文本做正则解析（消除文案耦合）。
+    kind/data 为空时（如「暂不支持城市」等错误返回）不带 ui，前端不出图，行为与旧解析一致。
+    """
+    metadata: dict = {}
+    if kind and data is not None:
+        metadata["ui"] = {"kind": kind, "data": data}
+    return ToolChunk(content=[TextBlock(text=text)], metadata=metadata)
 
 # 演示城市参数表（非官方，仅教学用）：
 #   social/fund = 个人社保/公积金比例；threshold = 个税起征点
@@ -50,7 +66,7 @@ def compute_salary(
     city: str,
     monthly_salary: float,
     deductions: float = 0.0,
-) -> str:
+) -> ToolChunk:
     """计算某城市月薪的到手收入（扣除社保、公积金、个税）。
 
     体现「负责任的 AI 输出」：给定参数返回确定性单点，同时给出
@@ -62,7 +78,7 @@ def compute_salary(
         deductions: 月度专项附加扣除额（元），默认 0（未申报）。
     """
     if city not in CITY_PARAMS:
-        return f"暂不支持城市：{city}"
+        return _ui_chunk(f"暂不支持城市：{city}")
 
     p = CITY_PARAMS[city]
 
@@ -89,7 +105,7 @@ def compute_salary(
     net_no_ded = monthly_salary - social - fund - tax0          # 未申报（个税高→到手低）
     net_with_ded = monthly_salary - social - fund - tax2        # 申报 2000（个税低→到手高）
 
-    return (
+    text = (
         f"{city}月薪 {monthly_salary:.0f} 元到手测算（估算）：\n"
         f"  缴费基数 ≈ {base:.0f} 元（{p['base_floor']:.0f}~{p['base_cap']:.0f}）{clamp_note}\n"
         f"  社保(个人) ≈ {social:.0f} 元（{p['social']*100:.1f}%）\n"
@@ -101,6 +117,18 @@ def compute_salary(
         f"  口径：到手=月薪−社保−公积金−个税；个税起征点 {p['threshold']:.0f}/月；"
         f"未计累计预扣法与年终奖；以上为演示参数，以官方为准。"
     )
+    # 结构化数据直接取自上面已算好的变量，与前端 SalaryChart 消费字段逐一对齐
+    data = {
+        "base": int(round(base)),
+        "social": int(round(social)),
+        "fund": int(round(fund)),
+        "tax": int(round(max(tax, 0))),
+        "net": int(round(net)),
+        "range": [int(round(net_no_ded)), int(round(net_with_ded))],
+        "city": city,
+        "monthly_salary": monthly_salary,
+    }
+    return _ui_chunk(text, "salary", data)
 
 
 # 租房演示惯例（非官方，仅教学用）：
@@ -122,10 +150,10 @@ def compute_rent(
     property_fee: float = 0.0,
     utility: float = 0.0,
     months: int = 12,
-) -> str:
+) -> ToolChunk:
     """计算某城市租房的成本构成（押金 / 中介费 / 首月支出 / 月均 / 年总）。
 
-    输出固定格式文本，便于后端正则提取结构化数据供前端画图（同 compute_salary 模式）。
+    输出固定格式文本供大模型阅读，同时把结构化数据放进返回的 metadata 供前端画图（不再靠后端正则解析）。
 
     Args:
         city: 城市名，如 "上海"、"北京"。
@@ -137,7 +165,7 @@ def compute_rent(
         months: 租期（月），默认 12。
     """
     if city not in RENT_DEFAULTS:
-        return f"暂不支持城市：{city} 的租房测算"
+        return _ui_chunk(f"暂不支持城市：{city} 的租房测算")
 
     d = RENT_DEFAULTS[city]
     if deposit_months is None:
@@ -151,7 +179,7 @@ def compute_rent(
     monthly_recurring = monthly_rent + property_fee + utility              # 月均持续成本
     year_total = monthly_recurring * months + agency                        # 年总成本（押金可退不计入）
 
-    return (
+    text = (
         f"{city}租房成本测算（月租金 {monthly_rent:.0f} 元）：\n"
         f"  押金 ≈ {deposit:.0f} 元（{deposit_months:g} 个月，退租可退）\n"
         f"  中介费 ≈ {agency:.0f} 元（{agency_fee_rate*100:.0f}% 月租金，一次性）\n"
@@ -160,6 +188,17 @@ def compute_rent(
         f"  年总成本 ≈ {year_total:.0f} 元（{months} 个月，押金可退不计入）\n"
         f"  口径：押金/中介费惯例为演示参数，实际以当地房源与中介约定为准。"
     )
+    # 与前端 RentChart 消费字段对齐（deposit/agency/first_month/monthly/year + city/monthly_rent）
+    data = {
+        "deposit": int(round(deposit)),
+        "agency": int(round(agency)),
+        "first_month": int(round(first_month)),
+        "monthly": int(round(monthly_recurring)),
+        "year": int(round(year_total)),
+        "city": city,
+        "monthly_rent": monthly_rent,
+    }
+    return _ui_chunk(text, "rent", data)
 
 
 # 通勤演示参数（非官方，仅教学用）：
@@ -198,10 +237,10 @@ def compute_commute(
     city: str,
     one_way_km: float,
     days_per_month: int = 22,
-) -> str:
+) -> ToolChunk:
     """按出行方式测算月度通勤成本（地铁公交 / 电动车 / 自驾 / 打车）。
 
-    输出固定格式文本，便于后端正则提取结构化数据供前端画图（同 compute_salary 模式）。
+    输出固定格式文本供大模型阅读，同时把结构化数据放进返回的 metadata 供前端画图（不再靠后端正则解析）。
 
     Args:
         city: 城市名，如 "上海"、"北京"。
@@ -209,9 +248,9 @@ def compute_commute(
         days_per_month: 每月通勤天数，默认 22（按 5 天×4.4 周估）。
     """
     if city not in COMMUTE_DEFAULTS:
-        return f"暂不支持城市：{city} 的通勤测算"
+        return _ui_chunk(f"暂不支持城市：{city} 的通勤测算")
     if one_way_km <= 0:
-        return "单程距离需大于 0 公里"
+        return _ui_chunk("单程距离需大于 0 公里")
 
     c = COMMUTE_DEFAULTS[city]
     trips = days_per_month * 2  # 每月往返总次数（双程）
@@ -227,7 +266,7 @@ def compute_commute(
     options = {"地铁/公交": subway, "电动车": ebike, "自驾": drive, "打车": taxi}
     cheapest_name, cheapest_val = min(options.items(), key=lambda kv: kv[1])
 
-    return (
+    text = (
         f"{city}通勤成本测算（单程 {one_way_km:g} 公里，每月 {days_per_month} 天×往返）：\n"
         f"  地铁/公交 ≈ {subway:.0f} 元/月（单程 {subway_once:.1f} 元）\n"
         f"  电动车 ≈ {ebike:.0f} 元/月（充电+磨损折算）\n"
@@ -238,6 +277,18 @@ def compute_commute(
         f"打车含起步+里程；未计换乘优惠/累计折扣/拼车/拥堵费；"
         f"电动车未计头盔保险；实际以当地运价与通勤路线为准。"
     )
+    # 与前端 CommuteChart 消费字段对齐（subway/ebike/drive/taxi/cheapest + city/one_way_km/days_per_month）
+    data = {
+        "subway": int(round(subway)),
+        "ebike": int(round(ebike)),
+        "drive": int(round(drive)),
+        "taxi": int(round(taxi)),
+        "cheapest": cheapest_name,
+        "city": city,
+        "one_way_km": one_way_km,
+        "days_per_month": days_per_month,
+    }
+    return _ui_chunk(text, "commute", data)
 
 
 # 房贷演示参数（非官方，仅教学用）：
@@ -267,10 +318,10 @@ def compute_mortgage(
     provident_amount: float | None = None,
     provident_rate: float | None = None,
     commercial_rate: float | None = None,
-) -> str:
+) -> ToolChunk:
     """测算房贷两种还款方式（等额本息 / 等额本金）的月供与总利息，支持商贷/公积金/组合贷。
 
-    输出固定格式文本，便于后端正则提取结构化数据供前端画还款计划对比图与月供构成图。
+    输出固定格式文本供大模型阅读，同时把结构化数据放进返回的 metadata 供前端画还款计划对比图与月供构成图。
 
     Args:
         loan_amount: 贷款总额（元）。
@@ -283,13 +334,13 @@ def compute_mortgage(
         commercial_rate: 商贷年利率（百分数）；缺省取 annual_rate 或演示默认。
     """
     if loan_amount <= 0:
-        return "贷款总额需大于 0 元"
+        return _ui_chunk("贷款总额需大于 0 元")
     if years <= 0:
-        return "贷款年限需大于 0 年"
+        return _ui_chunk("贷款年限需大于 0 年")
 
     lt = _LOAN_TYPE_ALIASES.get((loan_type or "商贷").strip())
     if lt is None:
-        return f"暂不支持贷款类型：{loan_type}（可选：商贷 / 公积金 / 组合）"
+        return _ui_chunk(f"暂不支持贷款类型：{loan_type}（可选：商贷 / 公积金 / 组合）")
 
     dp = MORTGAGE_PARAMS["default"]
     city_info = MORTGAGE_PARAMS["cap_by_city"].get((city or "").strip())
@@ -300,7 +351,7 @@ def compute_mortgage(
         comm_rate = dp["commercial_rate"]
     for r, label in ((comm_rate, "商贷"), (prov_rate, "公积金")):
         if r < 0:
-            return f"{label}年利率不能为负"
+            return _ui_chunk(f"{label}年利率不能为负")
 
     # 按类型拆出各计息段 (段名, 本金, 年利率)；额度校验优先于默认填充
     if lt == "商贷":
@@ -308,8 +359,10 @@ def compute_mortgage(
     elif lt == "公积金":
         amt = provident_amount if provident_amount is not None else loan_amount
         if cap is not None and amt > cap:
-            return (f"公积金贷款额 {amt:.0f} 元超过 {city} 最高贷款额 {cap:.0f} 元（演示参数）；"
-                    f"如需超出，请使用组合贷（公积金 {cap:.0f} + 商贷 {amt - cap:.0f}）")
+            return _ui_chunk(
+                f"公积金贷款额 {amt:.0f} 元超过 {city} 最高贷款额 {cap:.0f} 元（演示参数）；"
+                f"如需超出，请使用组合贷（公积金 {cap:.0f} + 商贷 {amt - cap:.0f}）"
+            )
         parts = [("公积金", amt, prov_rate)]
     else:  # 组合：公积金段先按城市上限封顶，剩余走商贷段
         want = provident_amount if provident_amount is not None else loan_amount
@@ -390,7 +443,30 @@ def compute_mortgage(
     if multi:
         tail += "组合贷月供为两段合计。"
     lines.append(f"  {tail}")
-    return "\n".join(lines)
+
+    # 与前端 MortgageChart 消费字段逐一对齐；structure 仅多段（组合贷）时下发供环图拆分
+    data = {
+        "annuity_pay": int(round(annuity_pay)),
+        "annuity_interest": int(round(annuity_interest)),
+        "ep_first": int(round(ep_first)),
+        "ep_last": int(round(ep_last)),
+        "ep_interest": int(round(ep_interest)),
+        "cheaper": cheaper,
+        "save": int(round(abs(save))),
+        "loan_type": lt,
+        "rates_label": merged if multi else f"{seg[0]['type']} {seg[0]['rate']:g}%",
+        "years": years,
+        "loan_amount": loan_amount,
+        "city": city,
+    }
+    if annual_rate is not None:
+        data["annual_rate"] = annual_rate
+    if multi:
+        data["structure"] = [
+            {"type": s["type"], "amount": s["amount"], "rate": s["rate"], "annuity_pay": s["annuity_pay"]}
+            for s in seg
+        ]
+    return _ui_chunk("\n".join(lines), "mortgage", data)
 
 
 # 生活成本指数演示参数（非官方，仅教学用）：
@@ -408,17 +484,17 @@ COST_INDEX = {
 }
 
 
-def compute_cost_index(base_city: str, cities: str) -> str:
+def compute_cost_index(base_city: str, cities: str) -> ToolChunk:
     """以某城市为基准（=100）测算若干城市的生活成本相对指数（租房/餐饮/交通/日用四类）。
 
-    输出固定格式文本，便于后端正则提取结构化数据供前端画分组柱状对比图（同 compute_commute 模式）。
+    输出固定格式文本供大模型阅读，同时把结构化数据放进返回的 metadata 供前端画分组柱状对比图。
 
     Args:
         base_city: 基准城市名（其指数记为 100），如 "上海"。
         cities: 参与对比的城市列表，用逗号分隔，如 "上海,北京,广州,成都"。
     """
     if base_city not in COST_INDEX:
-        return f"暂不支持基准城市：{base_city}"
+        return _ui_chunk(f"暂不支持基准城市：{base_city}")
 
     # 解析待对比城市（兼容中英文逗号、顿号、空格），去重保序，只留支持的
     normalized = (cities or "").replace("，", ",").replace("、", ",").replace(" ", ",")
@@ -428,7 +504,7 @@ def compute_cost_index(base_city: str, cities: str) -> str:
         if n and n in COST_INDEX and n not in names:
             names.append(n)
     if not names:
-        return f"没有可对比的城市（支持：{'、'.join(COST_INDEX)}）"
+        return _ui_chunk(f"没有可对比的城市（支持：{'、'.join(COST_INDEX)}）")
 
     # 基准城市保证在列表里且排首位
     if base_city in names:
@@ -440,11 +516,13 @@ def compute_cost_index(base_city: str, cities: str) -> str:
 
     lines = [f"生活成本指数对比（基准：{base_city} = 100）："]
     comps: dict[str, int] = {}
+    city_rows: list[dict] = []  # 结构化行，供前端 CostIndexChart 直接消费
     for name in names:
         cost = COST_INDEX[name]
         idx = [round(cost[c] / base[c] * 100) for c in COST_CATEGORIES]
         comp = round(sum(cost[c] for c in COST_CATEGORIES) / base_total * 100)
         comps[name] = comp
+        city_rows.append({"city": name, "composite": comp, "index": idx})
         cat_part = " / ".join(f"{c} {v}" for c, v in zip(COST_CATEGORIES, idx))
         lines.append(f"  {name}：综合 {comp}（{cat_part}）")
 
@@ -454,7 +532,15 @@ def compute_cost_index(base_city: str, cities: str) -> str:
         f"  口径：指数以基准城市=100 折算（>100 更贵、<100 更便宜）；"
         f"分类成本为演示简化均值，实际以个人消费结构与当地行情为准。"
     )
-    return "\n".join(lines)
+    # 与前端 CostIndexChart 消费字段对齐（base_city/categories/cities[{city,composite,index}]/cheapest）
+    data = {
+        "base_city": base_city,
+        "categories": list(COST_CATEGORIES),
+        "cities": city_rows,
+        "cheapest": cheapest_name,
+        "cheapest_composite": cheapest_comp,
+    }
+    return _ui_chunk("\n".join(lines), "cost-index", data)
 
 
 async def ask_user(question: str, options: str) -> str:
@@ -479,7 +565,7 @@ def _safe_stem(title: str) -> str:
     return stem[:40] or "report"
 
 
-def export_report(title: str, content: str) -> str:
+def export_report(title: str, content: str) -> ToolChunk:
     """把一份完整报告的正文落盘为 Markdown 文件，返回可下载链接。
 
     ⚠️ 这是一次「有副作用」的动作：会在服务器 data/exports/ 下写一个 .md 文件。
@@ -493,7 +579,7 @@ def export_report(title: str, content: str) -> str:
         content: 报告正文（Markdown 全文）。
     """
     if not content or not content.strip():
-        return "报告正文为空，无法导出；请先产出完整报告内容再调用 export_report。"
+        return _ui_chunk("报告正文为空，无法导出；请先产出完整报告内容再调用 export_report。")
 
     body = content.strip()
     stem = _safe_stem(title)
@@ -504,12 +590,13 @@ def export_report(title: str, content: str) -> str:
         EXPORT_DIR.mkdir(parents=True, exist_ok=True)
         (EXPORT_DIR / filename).write_text(body, encoding="utf-8")
     except OSError as e:  # noqa: BLE001
-        return f"报告导出失败：写入文件出错（{e}）。"
+        return _ui_chunk(f"报告导出失败：写入文件出错（{e}）。")
 
     url = f"/api/exports/{filename}"
-    return (
+    disp_title = (title or stem).strip()
+    text = (
         f"报告已导出（Markdown）：\n"
-        f"  标题：{(title or stem).strip()}\n"
+        f"  标题：{disp_title}\n"
         f"  文件：{filename}\n"
         f"  下载：{url}\n"
         f"  格式：Markdown\n"
@@ -517,3 +604,12 @@ def export_report(title: str, content: str) -> str:
         f"  说明：文件已保存在服务器 data/exports/，可通过下载链接获取；"
         f"如需 PDF，请在页面用「打印/另存为 PDF」生成。"
     )
+    # 与前端下载卡片（data-export）消费字段对齐
+    data = {
+        "title": disp_title,
+        "url": url,
+        "filename": filename,
+        "format": "Markdown",
+        "chars": len(body),
+    }
+    return _ui_chunk(text, "export", data)

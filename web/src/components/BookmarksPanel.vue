@@ -2,6 +2,7 @@
 // 收藏笔记本：搜索 / 标签筛选 / 备注与标签编辑 / 跳转原会话轮次 / 导出 Markdown
 import { ref, computed } from 'vue'
 import { marked } from 'marked'
+import { authFetch } from '../auth.js'
 
 const props = defineProps({
   bookmarks: { type: Array, default: () => [] },
@@ -45,7 +46,7 @@ const filtered = computed(() => {
 async function saveField(b, field, value) {
   if ((b[field] || '') === value) return
   b[field] = value  // 本地先行更新
-  await fetch(`/api/bookmarks/${b.id}`, {
+  await authFetch(`/api/bookmarks/${b.id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ [field]: value }),
@@ -54,7 +55,7 @@ async function saveField(b, field, value) {
 }
 
 async function remove(b) {
-  await fetch(`/api/bookmarks/${b.id}`, { method: 'DELETE' })
+  await authFetch(`/api/bookmarks/${b.id}`, { method: 'DELETE' })
   emit('refresh')
 }
 

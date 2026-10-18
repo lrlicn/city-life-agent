@@ -19,12 +19,18 @@ from src.tools import compute_salary, compute_rent, compute_commute, compute_mor
 
 
 def make_chat_model() -> OpenAIChatModel:
-    """构造对话模型（已确认：base_url 放 OpenAICredential）。"""
+    """构造对话模型（已确认：base_url 放 OpenAICredential）。
+
+    重试：AgentScope 内建最多 max_retries+1 次尝试（固定间隔 retry_delay 退避，429 已纳入重试）；
+    这里把阈值交给 config（弱网/限流可调）。注意：内建为固定间隔而非指数退避。
+    """
     credential = OpenAICredential(api_key=config.API_KEY, base_url=config.BASE_URL)
     return OpenAIChatModel(
         credential=credential,
         model=config.CHAT_MODEL,
         stream=True,
+        max_retries=config.MODEL_MAX_RETRIES,
+        retry_delay=config.MODEL_RETRY_DELAY,
     )
 
 

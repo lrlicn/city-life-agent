@@ -1,6 +1,7 @@
 <script setup>
-import { ref, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { useSettings } from '../composables/useSettings.js'
+import { getToken, getUserName, setUserName, logout } from '../auth.js'
 
 // 全局审批开关（与 ChatView 输入条 chip 绑定同一份共享状态）
 const { requireApproval, toggleApproval } = useSettings()
@@ -20,6 +21,13 @@ const editText = ref('')
 const settingsOpen = ref(false)
 const confirmDel = ref(null)  // { id, title }
 const sideListRef = ref(null)
+
+// 当前用户（令牌登录）：显示名 + 退出；authed 仅在有令牌时显示退出按钮
+const userName = ref(getUserName())
+const authed = ref(!!getToken())
+const nameInitial = computed(() => (userName.value.trim()[0] || '访'))
+function saveName() { setUserName(userName.value) }
+function doLogout() { logout() }
 
 // 检测每个会话标题是否溢出，溢出则动态设置滚动距离
 async function checkOverflow() {
@@ -170,6 +178,13 @@ function fmtTime(ts) {
 
     <!-- 底部：收藏笔记本 + 设置入口 -->
     <div class="side-footer" @click.stop>
+      <div class="user-chip">
+        <span class="u-avatar">{{ nameInitial }}</span>
+        <span class="u-name">{{ userName || '访客' }}</span>
+        <button v-if="authed" class="u-out" @click="doLogout" data-tip="退出登录">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        </button>
+      </div>
       <button class="bm-btn" @click="emit('openBookmarks')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
@@ -184,6 +199,10 @@ function fmtTime(ts) {
 
       <!-- 设置浮层 -->
       <div v-if="settingsOpen" class="settings-pop">
+        <div class="pop-title">账户</div>
+        <div class="acct-row">
+          <input class="acct-name" v-model="userName" maxlength="24" placeholder="昵称" @change="saveName" />
+        </div>
         <div class="pop-title">外观</div>
         <div class="theme-group">
           <button
@@ -453,4 +472,36 @@ function fmtTime(ts) {
   transition: transform .18s;
 }
 .switch.on .knob { transform: translateX(16px); }
+
+/* 当前用户 chip */
+.user-chip {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px; margin-bottom: 6px; border-radius: 9px;
+}
+.u-avatar {
+  width: 26px; height: 26px; flex-shrink: 0; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, #12B98D, #0A7F60);
+  color: #fff; font-size: 12px; font-weight: 600;
+}
+.u-name {
+  flex: 1; min-width: 0; font-size: 13px; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.u-out {
+  width: 26px; height: 26px; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; background: transparent; color: var(--text-dim); cursor: pointer; border-radius: 6px;
+}
+.u-out:hover { background: var(--err-bg); color: var(--err); }
+.u-out svg { width: 16px; height: 16px; }
+
+/* 设置浮层：账户改名 */
+.acct-row { margin-bottom: 12px; }
+.acct-name {
+  box-sizing: border-box; width: 100%; padding: 7px 10px; font-size: 13px;
+  border: 1px solid var(--border-strong); border-radius: 8px;
+  background: var(--panel-soft); color: var(--text); outline: none;
+}
+.acct-name:focus { border-color: var(--accent); }
 </style>

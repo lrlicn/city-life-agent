@@ -77,12 +77,26 @@ def init_db() -> None:
                 updated_at      INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_bm_user ON bookmarks(user_id, updated_at DESC);
+            CREATE TABLE IF NOT EXISTS exports (
+                filename        TEXT PRIMARY KEY,
+                user_id         TEXT NOT NULL DEFAULT 'default',
+                conversation_id TEXT,
+                created_at      INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_exp_user ON exports(user_id, created_at DESC);
             """
         )
-        # 迁移：为旧库补 duration_ms 列（assistant 消息的回答生成耗时，落库供历史回看）
+        # 迁移：为旧库补列（幂等）。duration_ms=回答生成耗时；
+        # input_tokens/output_tokens=本轮模型用量；cost=按单价折算成本（未配单价时为 NULL）。
         cols = {r["name"] for r in c.execute("PRAGMA table_info(messages)").fetchall()}
-        if "duration_ms" not in cols:
-            c.execute("ALTER TABLE messages ADD COLUMN duration_ms INTEGER")
+        for col, decl in (
+            ("duration_ms", "INTEGER"),
+            ("input_tokens", "INTEGER"),
+            ("output_tokens", "INTEGER"),
+            ("cost", "REAL"),
+        ):
+            if col not in cols:
+                c.execute(f"ALTER TABLE messages ADD COLUMN {col} {decl}")
         c.commit()
     finally:
         c.close()
@@ -207,10 +221,14 @@ def add_message(
     mode: str | None = None,
     user_id: str = DEFAULT_USER,
     duration_ms: int | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    cost: float | None = None,
 ) -> dict:
     """落一条消息。parts 是 AI SDK parts 数组（list[dict]）。
 
     duration_ms：assistant 消息的回答生成耗时（毫秒），user 消息留空。
+    input_tokens/output_tokens/cost：本轮模型用量与折算成本（assistant 才有）。
     """
     import json
 
@@ -219,9 +237,11 @@ def add_message(
     c = _conn()
     try:
         c.execute(
-            "INSERT INTO messages (id, conversation_id, user_id, role, parts_json, mode, created_at, duration_ms) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (mid, conv_id, user_id, role, json.dumps(parts, ensure_ascii=False), mode, now, duration_ms),
+            "INSERT INTO messages (id, conversation_id, user_id, role, parts_json, mode, created_at, "
+            "duration_ms, input_tokens, output_tokens, cost) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (mid, conv_id, user_id, role, json.dumps(parts, ensure_ascii=False), mode, now,
+             duration_ms, input_tokens, output_tokens, cost),
         )
         c.commit()
         return {"id": mid, "conversation_id": conv_id, "role": role, "created_at": now}
@@ -373,5 +393,31 @@ def delete_bookmark(bid: str, user_id: str = DEFAULT_USER) -> bool:
         cur = c.execute("DELETE FROM bookmarks WHERE id=? AND user_id=?", (bid, user_id))
         c.commit()
         return cur.rowcount > 0
+    finally:
+        c.close()
+
+
+# ---- exports（导出文件归属，供下载时校验属主）----
+
+def record_export(filename: str, user_id: str = DEFAULT_USER, conv_id: str | None = None) -> None:
+    """记录一个导出文件的归属（谁导的）。重复写则更新归属时间。"""
+    c = _conn()
+    try:
+        c.execute(
+            "INSERT INTO exports (filename, user_id, conversation_id, created_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(filename) DO UPDATE SET user_id=excluded.user_id, created_at=excluded.created_at",
+            (filename, user_id, conv_id, _now()),
+        )
+        c.commit()
+    finally:
+        c.close()
+
+
+def get_export_owner(filename: str) -> str | None:
+    """返回导出文件的归属 user_id；未记录过返回 None。"""
+    c = _conn()
+    try:
+        row = c.execute("SELECT user_id FROM exports WHERE filename=?", (filename,)).fetchone()
+        return row["user_id"] if row else None
     finally:
         c.close()

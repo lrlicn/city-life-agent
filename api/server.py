@@ -14,6 +14,8 @@ import os
 import re
 import sys
 import time
+import uuid
+from urllib.parse import parse_qs
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -21,6 +23,7 @@ from starlette.applications import Starlette
 from starlette.responses import StreamingResponse, JSONResponse, FileResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
+from starlette.datastructures import Headers
 from pydantic import BaseModel
 
 from agentscope.event import EventType, UserConfirmResultEvent, ConfirmResult
@@ -28,16 +31,19 @@ from agentscope.message import UserMsg, AssistantMsg
 
 from src.rag_build import build_knowledge_base
 from src.agent_runner import build_rag_agent
-from src import db, config, interaction
+from src import db, config, interaction, observability
 from openai import OpenAI
 
-# 启动即建表（幂等）
+# 启动即建表（幂等）+ 初始化结构化日志
+
+
 db.init_db()
+observability.setup_logging()
 
 # 轻量客户端：用于异步生成会话标题
 _title_client = OpenAI(api_key=config.API_KEY, base_url=config.BASE_URL)
 
-async def generate_title_async(conv_id: str, question: str):
+async def generate_title_async(conv_id: str, question: str, user_id: str = "default"):
     """后台异步生成总结性标题，不阻塞主响应"""
     import asyncio
     def _gen():
@@ -54,12 +60,60 @@ async def generate_title_async(conv_id: str, question: str):
             title = r.choices[0].message.content.strip().strip('"').strip("'")
             if title:
                 # 覆盖占位标题（原始问题截断）；expect_current 防止覆盖用户手动改名
-                db.set_conversation_summary_title(conv_id, title[:30], question[:30])
+                db.set_conversation_summary_title(conv_id, title[:30], question[:30], user_id=user_id)
         except Exception as e:
-            print(f"[title-gen] 失败: {e}")
+            observability.log_exception("title.gen_failed", e, conv_id=conv_id)
     await asyncio.to_thread(_gen)
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+
+# ---- 身份与访问控制（P1·每人一个访问令牌）----
+# 受保护前缀：数据端点 /api/*（含 /api/exports 下载）与推理端点 /chat、/chat-ai。
+# 静态首页/资源不拦（由 index.html 加载后，前端凭令牌调 /api，无令牌→401 弹门）。
+_PROTECTED_PREFIXES = ("/api/", "/chat", "/chat-ai")
+
+
+def _extract_token(headers: Headers, query_string: str) -> str:
+    """依次从 Authorization: Bearer、x-agent-token 头、?t= 查询参数取令牌（导出链接用查询）。"""
+    auth = (headers.get("authorization", "") or "").strip()
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    tok = (headers.get("x-agent-token", "") or "").strip()
+    if tok:
+        return tok
+    return (parse_qs(query_string).get("t") or [""])[0]
+
+
+class AuthMiddleware:
+    """纯 ASGI 中间件：对受保护路径校验访问令牌→解析 user_id 注入 scope.state。
+
+    不用 BaseHTTPMiddleware，避免包裹响应体破坏 SSE 流式。config.AUTH_ENABLED=False 时全放行。
+    """
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        path = scope.get("path", "")
+        if not config.AUTH_ENABLED or not path.startswith(_PROTECTED_PREFIXES):
+            await self.app(scope, receive, send)
+            return
+        headers = Headers(scope=scope)
+        token = _extract_token(headers, scope.get("query_string", "").decode())
+        user_id = config.AGENT_TOKEN_MAP.get(token)
+        if not user_id:
+            resp = JSONResponse({"ok": False, "msg": "未授权：访问令牌缺失或无效"}, status_code=401)
+            await resp(scope, receive, send)
+            return
+        scope.setdefault("state", {})["user_id"] = user_id
+        await self.app(scope, receive, send)
+
+
+def _uid(request) -> str:
+    """当前请求的 user_id：鉴权开启时取中间件注入值，否则 default（本地自用）。"""
+    return getattr(request.state, "user_id", None) or db.DEFAULT_USER
 
 # 知识库单例：进程内只建一次，避免每次请求重复入库、累积重复 doc_id。
 _kb_cache = None
@@ -80,11 +134,13 @@ class ChatRequest(BaseModel):
     mode: str | None = None
     conversation_id: str | None = None
     require_approval: bool = False   # 阶段二：需审批（工具执行前弹确认）/ 免审批（BYPASS）
+    user_id: str = db.DEFAULT_USER   # 鉴权中间件解析后由 chat_ai 注入；会话/消息/导出按此隔离
 
 
 async def event_gen(req: ChatRequest):
-    """SSE 事件流：工具调用事件 + 文本 delta，逐条推给前端。"""
+    """SSE 事件流：工具调用事件 + 文本 delta，逐条推给前端（简易端点，非主聊天链路）。"""
     try:
+        observability.bind_context(trace_id=uuid.uuid4().hex[:12])
         kb = await get_kb()
         agent = await build_rag_agent(kb, req.mode)
         user_msg = UserMsg(name="user", content=req.question)
@@ -93,8 +149,9 @@ async def event_gen(req: ChatRequest):
                 yield f"data: {json.dumps({'type': 'tool', 'name': event.tool_call_name}, ensure_ascii=False)}\n\n"
             elif event.type == EventType.TEXT_BLOCK_DELTA:
                 yield f"data: {json.dumps({'type': 'text', 'delta': event.delta}, ensure_ascii=False)}\n\n"
-    except Exception as e:  # noqa: BLE001 —— 流式中断时把错误推给前端
-        yield f"data: {json.dumps({'type': 'error', 'msg': str(e)}, ensure_ascii=False)}\n\n"
+    except Exception as e:  # noqa: BLE001 —— 堆栈只进日志，前端只拿脱敏文案
+        observability.log_exception("chat.error", e)
+        yield f"data: {json.dumps({'type': 'error', 'msg': '服务暂时不可用，请稍后重试。'}, ensure_ascii=False)}\n\n"
     yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
 
 
@@ -105,159 +162,6 @@ def _parse_tool_input(raw: str) -> dict:
         return obj if isinstance(obj, dict) else {}
     except Exception:  # noqa: BLE001
         return {}
-
-
-def _parse_salary_output(text: str) -> dict | None:
-    """从 compute_salary 输出文本提取结构化数字，供前端生成式 UI 画图。
-
-    compute_salary 输出格式固定（见 src/tools.py），用正则抓关键数值；
-    若拿不到「到手」则视为解析失败返回 None。
-    """
-    def grab(pattern: str) -> int | None:
-        m = re.search(pattern, text)
-        return int(m.group(1)) if m else None
-
-    data = {
-        "base": grab(r"缴费基数 ≈ (\d+)"),
-        "social": grab(r"社保\(个人\) ≈ (\d+)"),
-        "fund": grab(r"公积金\(个人\) ≈ (\d+)"),
-        "tax": grab(r"个税 ≈ (\d+)"),
-        "net": grab(r"到手 ≈ (\d+)"),
-    }
-    m = re.search(r"估算区间：约 (\d+) ~ (\d+)", text)
-    if m:
-        data["range"] = [int(m.group(1)), int(m.group(2))]
-    return data if data["net"] is not None else None
-
-
-def _parse_rent_output(text: str) -> dict | None:
-    """从 compute_rent 输出文本提取结构化数字，供前端生成式 UI 画租房构成图。"""
-    def grab(pattern: str) -> int | None:
-        m = re.search(pattern, text)
-        return int(m.group(1)) if m else None
-
-    data = {
-        "deposit": grab(r"押金 ≈ (\d+)"),
-        "agency": grab(r"中介费 ≈ (\d+)"),
-        "first_month": grab(r"首月一次性支出 ≈ (\d+)"),
-        "monthly": grab(r"月均生活成本 ≈ (\d+)"),
-        "year": grab(r"年总成本 ≈ (\d+)"),
-    }
-    return data if data["first_month"] is not None else None
-
-
-def _parse_commute_output(text: str) -> dict | None:
-    """从 compute_commute 输出文本提取各方式月成本，供前端画通勤对比图。"""
-    def grab(pattern: str) -> int | None:
-        m = re.search(pattern, text)
-        return int(m.group(1)) if m else None
-
-    data = {
-        "subway": grab(r"地铁/公交 ≈ (\d+)"),
-        "ebike": grab(r"电动车 ≈ (\d+)"),
-        "drive": grab(r"自驾 ≈ (\d+)"),
-        "taxi": grab(r"打车 ≈ (\d+)"),
-    }
-    m = re.search(r"最省 ≈ (\S+) 约 (\d+)", text)
-    if m:
-        data["cheapest"] = m.group(1)
-    return data if data["subway"] is not None else None
-
-
-def _parse_mortgage_output(text: str) -> dict | None:
-    """从 compute_mortgage 输出文本提取还款方式关键数值与月供构成，供前端画对比折线与构成环图。
-
-    单段（纯商贷/纯公积金）行式如「商贷等额本息月供 ≈ N」；组合贷带「合计」前缀，
-    另有「- 类型 贷款 X 元 @ R%，月供 ≈ N」拆分行 → structure（多段才下发）。
-    """
-    def grab(pattern: str) -> int | None:
-        m = re.search(pattern, text)
-        return int(m.group(1)) if m else None
-
-    data = {
-        "annuity_pay": grab(r"等额本息月供 ≈ (\d+)"),
-        "annuity_interest": grab(r"等额本息总利息 ≈ (\d+)"),
-        "ep_first": grab(r"等额本金首月 ≈ (\d+)"),
-        "ep_last": grab(r"等额本金末月 ≈ (\d+)"),
-        "ep_interest": grab(r"等额本金总利息 ≈ (\d+)"),
-    }
-    m = re.search(r"利息更省 ≈ (\S+) 约省 (\d+)", text)
-    if m:
-        data["cheaper"] = m.group(1)
-        data["save"] = int(m.group(2))
-    # 月供构成拆分（等额本息口径）：商贷/公积金/组合均提取，仅多段时前端画环图
-    segs = [{"type": m.group(1), "amount": int(m.group(2)), "rate": float(m.group(3)),
-             "annuity_pay": int(m.group(4))}
-            for m in re.finditer(r"- (\S+) 贷款 (\d+) 元 @ ([\d.]+)%，月供 ≈ (\d+)", text)]
-    if len(segs) > 1:
-        data["structure"] = segs
-    mt = re.search(r"组合贷：(.+?)，(\d+) 年", text)
-    if mt:
-        data["loan_type"] = "组合"
-        data["rates_label"] = mt.group(1)
-        data["years"] = int(mt.group(2))
-    else:
-        m1 = re.search(r"贷款 \d+ 元，(商贷|公积金)，年利率 ([\d.]+)%，(\d+) 年", text)
-        if m1:
-            data["loan_type"] = m1.group(1)
-            data["rates_label"] = f"{m1.group(1)} {m1.group(2)}%"
-            data["years"] = int(m1.group(3))
-    return data if data["annuity_pay"] is not None else None
-
-
-def _parse_cost_index_output(text: str) -> dict | None:
-    """从 compute_cost_index 输出文本提取各城市分类指数，供前端画分组柱状对比图。
-
-    行式契约（见 src/tools.py）：每城市一行  {city}：综合 {n}（租房 a / 餐饮 b / 交通 c / 日用 d）。
-    """
-    mb = re.search(r"基准：(\S+) = 100", text)
-    base_city = mb.group(1) if mb else ""
-    cities = []
-    for m in re.finditer(
-        r"(\S+)：综合 (\d+)（租房 (\d+) / 餐饮 (\d+) / 交通 (\d+) / 日用 (\d+)）", text
-    ):
-        cities.append({
-            "city": m.group(1),
-            "composite": int(m.group(2)),
-            "index": [int(m.group(3)), int(m.group(4)), int(m.group(5)), int(m.group(6))],
-        })
-    mc = re.search(r"最省 ≈ (\S+) 综合 (\d+)", text)
-    data = {
-        "base_city": base_city,
-        "categories": ["租房", "餐饮", "交通", "日用"],
-        "cities": cities,
-    }
-    if mc:
-        data["cheapest"] = mc.group(1)
-        data["cheapest_composite"] = int(mc.group(2))
-    return data if cities else None
-
-
-def _parse_export_output(text: str) -> dict | None:
-    """从 export_report 输出文本提取报告标题/下载链接/文件名，供前端渲染下载卡片。
-
-    行式契约（见 src/tools.py）：仅当报告真正落盘（含「报告已导出」且「下载：」行）才返回。
-    """
-    if not text or "报告已导出" not in text:
-        return None
-
-    def grab(pattern: str) -> str | None:
-        m = re.search(pattern, text)
-        return m.group(1).strip() if m else None
-
-    url = grab(r"下载：(\S+)")
-    if not url:
-        return None
-    data = {
-        "title": grab(r"标题：(.+)") or "报告",
-        "url": url,
-        "filename": grab(r"文件：(\S+)") or url.rsplit("/", 1)[-1],
-        "format": grab(r"格式：(\S+)") or "Markdown",
-    }
-    wc = re.search(r"字数：(\d+)", text)
-    if wc:
-        data["chars"] = int(wc.group(1))
-    return data
 
 
 # 思考块里易泄漏的「元指令复读」行特征：命中即整行丢弃（提示词已约束，此为兼底）
@@ -312,6 +216,8 @@ async def event_gen_ai(req: ChatRequest):
     """
     try:
         _t0 = time.monotonic()   # 回答生成耗时起点（含 RAG 检索 + Agent 全链路）
+        trace_id = uuid.uuid4().hex[:12]   # 一次问答一个 trace_id，贯穿该请求所有日志行
+        observability.bind_context(trace_id=trace_id)
         kb = await get_kb()
         agent = await build_rag_agent(kb, req.mode, require_approval=req.require_approval)
         # 多轮记忆：把该会话历史文本消息转成 Msg list 一并回喂（只取最近 20 条，控 token）
@@ -320,15 +226,18 @@ async def event_gen_ai(req: ChatRequest):
         is_first_turn = not conv_id      # 新建会话首轮才做 AI 标题总结（避免每轮重写）
         # 新建会话首次发消息：立刻建会话+设标题，不等流式结束
         if not conv_id:
-            cv = db.create_conversation()
+            cv = db.create_conversation(user_id=req.user_id)
             conv_id = cv["id"]
             db.set_conversation_title(conv_id, req.question[:30])
             # 标题只依赖问题：立刻后台并发生成，与回答流式同时进行。
             # 通常几秒内完成，远早于回答结束 → 前端可在生成期间就轮询到总结标题
             import asyncio
-            asyncio.create_task(generate_title_async(conv_id, req.question))
+            asyncio.create_task(generate_title_async(conv_id, req.question, user_id=req.user_id))
+        observability.bind_context(conv_id=conv_id)
+        observability.log_event("chat.request", mode=req.mode, require_approval=req.require_approval,
+                                q_len=len(req.question), first_turn=is_first_turn)
         if conv_id:
-            for m in db.list_messages(conv_id)[-20:]:
+            for m in db.list_messages(conv_id, user_id=req.user_id)[-20:]:
                 t = "".join(p.get("text", "") for p in m["parts"] if p.get("type") == "text")
                 if not t.strip():
                     continue
@@ -340,7 +249,7 @@ async def event_gen_ai(req: ChatRequest):
         inputs = history_msgs + [new_msg] if history_msgs else new_msg
         # 用户消息立刻写入数据库，保证下一轮对话能读到历史
         db.add_message(conv_id, "user",
-                       [{"type": "text", "text": req.question}], mode=req.mode)
+                       [{"type": "text", "text": req.question}], mode=req.mode, user_id=req.user_id)
         msg_id = f"msg_{conv_id}_{int(__import__('time').time() * 1000)}"
         yield f'data: {json.dumps({"type":"start","messageId":msg_id})}\n\n'
         # 新会话：把后端真实会话 id 权威透传给前端，供其在生成期间提前对账（临时 id → 真实 id），
@@ -362,6 +271,8 @@ async def event_gen_ai(req: ChatRequest):
         reason_seq = 0                    # 思考块序号（每块独立 id，多块不合并）
         current_reason_id = ""            # 当前思考块的 reasoning part id
         reason_t0 = 0.0                   # 当前思考块起始时间
+        tok_in = 0                        # 本轮累计输入 token（由 MODEL_CALL_END 汇总）
+        tok_out = 0                       # 本轮累计输出 token
         while True:
             parked = None
             async for event in agent.reply_stream(inputs):
@@ -413,68 +324,23 @@ async def event_gen_ai(req: ChatRequest):
                         "output": output,
                         "ms": int((time.monotonic() - tool_t0.get(tcid, _t0)) * 1000),
                     })
-                    # 生成式 UI：compute_salary → data-salary part（前端据此画图）
-                    if name == "compute_salary" and output:
-                        parsed = _parse_salary_output(output)
-                        if parsed:
-                            if inp.get("city"):
-                                parsed["city"] = inp.get("city")
-                            if inp.get("monthly_salary") is not None:
-                                parsed["monthly_salary"] = inp.get("monthly_salary")
-                            yield f"data: {json.dumps({'type': 'data-salary', 'data': parsed}, ensure_ascii=False)}\n\n"
-                            stream_parts.append({"type": "data-salary", "data": parsed})
-                    # 生成式 UI：compute_rent → data-rent part（前端据此画租房构成图）
-                    if name == "compute_rent" and output:
-                        parsed = _parse_rent_output(output)
-                        if parsed:
-                            if inp.get("city"):
-                                parsed["city"] = inp.get("city")
-                            if inp.get("monthly_rent") is not None:
-                                parsed["monthly_rent"] = inp.get("monthly_rent")
-                            yield f"data: {json.dumps({'type': 'data-rent', 'data': parsed}, ensure_ascii=False)}\n\n"
-                            stream_parts.append({"type": "data-rent", "data": parsed})
-                    # 生成式 UI：compute_commute → data-commute part（前端据此画通勤对比图）
-                    if name == "compute_commute" and output:
-                        parsed = _parse_commute_output(output)
-                        if parsed:
-                            if inp.get("city"):
-                                parsed["city"] = inp.get("city")
-                            if inp.get("one_way_km") is not None:
-                                parsed["one_way_km"] = inp.get("one_way_km")
-                            if inp.get("days_per_month") is not None:
-                                parsed["days_per_month"] = inp.get("days_per_month")
-                            yield f"data: {json.dumps({'type': 'data-commute', 'data': parsed}, ensure_ascii=False)}\n\n"
-                            stream_parts.append({"type": "data-commute", "data": parsed})
-                    # 生成式 UI：compute_mortgage → data-mortgage part（前端据此画还款计划对比图）
-                    if name == "compute_mortgage" and output:
-                        parsed = _parse_mortgage_output(output)
-                        if parsed:
-                            if inp.get("loan_amount") is not None:
-                                parsed["loan_amount"] = inp.get("loan_amount")
-                            if inp.get("annual_rate") is not None:
-                                parsed["annual_rate"] = inp.get("annual_rate")
-                            if inp.get("years") is not None:
-                                parsed["years"] = inp.get("years")
-                            if inp.get("city"):
-                                parsed["city"] = inp.get("city")
-                            if inp.get("loan_type"):
-                                parsed["loan_type"] = inp.get("loan_type")
-                            yield f"data: {json.dumps({'type': 'data-mortgage', 'data': parsed}, ensure_ascii=False)}\n\n"
-                            stream_parts.append({"type": "data-mortgage", "data": parsed})
-                    # 生成式 UI：compute_cost_index → data-cost-index part（前端据此画多城市成本指数对比图）
-                    if name == "compute_cost_index" and output:
-                        parsed = _parse_cost_index_output(output)
-                        if parsed:
-                            if inp.get("base_city"):
-                                parsed["base_city"] = inp.get("base_city")
-                            yield f"data: {json.dumps({'type': 'data-cost-index', 'data': parsed}, ensure_ascii=False)}\n\n"
-                            stream_parts.append({"type": "data-cost-index", "data": parsed})
-                    # 生成式 UI：export_report → data-export part（前端据此渲染报告下载卡片）
-                    if name == "export_report" and output:
-                        parsed = _parse_export_output(output)
-                        if parsed:
-                            yield f"data: {json.dumps({'type': 'data-export', 'data': parsed}, ensure_ascii=False)}\n\n"
-                            stream_parts.append({"type": "data-export", "data": parsed})
+                    # 生成式 UI：工具已把结构化数据放进 result.metadata.ui（见 src/tools.py），
+                    # 后端直接读取并下发 data-{kind} part，不再对输出文本做正则解析（消除文案耦合）。
+                    ui = (getattr(event, "metadata", None) or {}).get("ui")
+                    if isinstance(ui, dict) and ui.get("kind") and ui.get("data") is not None:
+                        part = {"type": f"data-{ui['kind']}", "data": ui["data"]}
+                        yield f"data: {json.dumps(part, ensure_ascii=False)}\n\n"
+                        stream_parts.append(part)
+                        # 导出成功：记录文件归属（供 /api/exports 下载时校验属主）
+                        if ui["kind"] == "export":
+                            _fn = (ui["data"] or {}).get("filename")
+                            if _fn:
+                                db.record_export(_fn, user_id=req.user_id, conv_id=conv_id)
+                    observability.log_event(
+                        "tool.result", tool=name,
+                        ms=int((time.monotonic() - tool_t0.get(tcid, _t0)) * 1000),
+                        out_len=len(output), has_ui=isinstance(ui, dict) and bool(ui.get("kind")),
+                    )
                 elif event.type == EventType.THINKING_BLOCK_START:
                     # 先把正在累积的文本存起来，保持原始顺序
                     if current_text is not None and current_text["text"].strip():
@@ -510,6 +376,10 @@ async def event_gen_ai(req: ChatRequest):
                     yield f"data: {json.dumps({'type': 'text-delta', 'id': text_id, 'delta': event.delta}, ensure_ascii=False)}\n\n"
                     final_text += event.delta
                     current_text["text"] += event.delta
+                elif event.type == EventType.MODEL_CALL_END:
+                    # 模型每次调用结束携带 token 用量（input/output），累加为本轮总用量
+                    tok_in += event.input_tokens or 0
+                    tok_out += event.output_tokens or 0
                 elif event.type == EventType.REQUIRE_USER_CONFIRM:
                     # 阶段二·工具审批：Agent 在本趟流末尾 park，等待外部确认。
                     # 记下待确认事件（reply_id + 待批 tool_calls），交本 while 收尾下发确认卡片。
@@ -530,6 +400,8 @@ async def event_gen_ai(req: ChatRequest):
             decision = await interaction.wait_result(iid, fut, timeout=600)
             approved = decision == "approve"
             inter["answered"] = decision or "timeout"
+            observability.log_event("tool.approval", decision=decision or "timeout",
+                                    tools=[tc.name for tc in tcs])
             # 用确认结果在同一 agent 上续跑：批准→执行工具；拒绝/超时→该工具被 DENY，模型据此收尾
             inputs = UserConfirmResultEvent(
                 reply_id=reply_id,
@@ -543,10 +415,17 @@ async def event_gen_ai(req: ChatRequest):
         # 按原始顺序落库：assistant 消息（user 消息已在流式开始前写入）
         if stream_parts:
             elapsed_ms = int((time.monotonic() - _t0) * 1000)
-            db.add_message(conv_id, "assistant", stream_parts, mode=req.mode, duration_ms=elapsed_ms)
+            cost = observability.estimate_cost(tok_in, tok_out)
+            db.add_message(conv_id, "assistant", stream_parts, mode=req.mode, duration_ms=elapsed_ms,
+                           input_tokens=tok_in, output_tokens=tok_out, cost=cost, user_id=req.user_id)
+            observability.log_event("chat.done", ms=elapsed_ms, input_tokens=tok_in,
+                                    output_tokens=tok_out, cost=cost)
         db.touch_conversation(conv_id)
     except Exception as e:  # noqa: BLE001
-        yield f"data: {json.dumps({'type': 'error', 'errorText': str(e)}, ensure_ascii=False)}\n\n"
+        # 原始堆栈只进日志（带 trace_id/conv_id）；前端只收到脱敏语义标记，
+        # 其 friendlyError 会把 internal 映射为「服务暂时不可用，请稍后重试。」
+        observability.log_exception("chat.error", e)
+        yield f"data: {json.dumps({'type': 'error', 'errorText': 'internal_error'}, ensure_ascii=False)}\n\n"
     yield 'data: {"type":"finish"}\n\n'
     yield "data: [DONE]\n\n"
 
@@ -562,6 +441,7 @@ async def chat_ai(request):
         mode=body.get("mode"),
         conversation_id=body.get("conversationId") or body.get("conversation_id"),
         require_approval=bool(body.get("require_approval")),
+        user_id=_uid(request),
     )
     for m in reversed(body.get("messages") or []):
         if m.get("role") != "user":
@@ -577,6 +457,14 @@ async def chat_ai(request):
     if not req.question.strip():
         return StreamingResponse(
             iter([f"data: {json.dumps({'type': 'error', 'errorText': 'question 不能为空'}, ensure_ascii=False)}\n\n"]),
+            media_type="text/event-stream",
+            headers={"x-vercel-ai-ui-message-stream": "v1"},
+        )
+    # 输入长度硬护栏：防误贴/故意超长烧 token（前端 submit 会先拦，此为服务端子兵兼带防御）
+    if config.MAX_INPUT_CHARS and len(req.question) > config.MAX_INPUT_CHARS:
+        observability.log_event("chat.reject", reason="input_too_long", q_len=len(req.question))
+        return StreamingResponse(
+            iter([f"data: {json.dumps({'type': 'error', 'errorText': 'input_too_long'}, ensure_ascii=False)}\n\n"]),
             media_type="text/event-stream",
             headers={"x-vercel-ai-ui-message-stream": "v1"},
         )
@@ -601,13 +489,13 @@ async def chat(request):
 # ---- 会话 CRUD（SQLite 持久化）----
 
 async def api_list_conversations(request):
-    rows = db.list_conversations()
+    rows = db.list_conversations(_uid(request))
     return JSONResponse(rows)
 
 
 async def api_create_conversation(request):
     body = await request.json()
-    cv = db.create_conversation(city=body.get("city"))
+    cv = db.create_conversation(city=body.get("city"), user_id=_uid(request))
     return JSONResponse(cv)
 
 
@@ -616,17 +504,17 @@ async def api_rename_conversation(request):
     title = str(body.get("title", "")).strip()[:40]
     if not title:
         return JSONResponse({"ok": False, "msg": "title 为空"}, status_code=400)
-    ok = db.rename_conversation(request.path_params["conv_id"], title)
+    ok = db.rename_conversation(request.path_params["conv_id"], title, user_id=_uid(request))
     return JSONResponse({"ok": ok})
 
 
 async def api_delete_conversation(request):
-    ok = db.delete_conversation(request.path_params["conv_id"])
+    ok = db.delete_conversation(request.path_params["conv_id"], user_id=_uid(request))
     return JSONResponse({"ok": ok})
 
 
 async def api_list_messages(request):
-    msgs = db.list_messages(request.path_params["conv_id"])
+    msgs = db.list_messages(request.path_params["conv_id"], user_id=_uid(request))
     return JSONResponse(msgs)
 
 
@@ -639,14 +527,14 @@ async def api_truncate_conversation(request):
         turn = 0
     if turn < 1:
         return JSONResponse({"ok": False, "msg": "turn 需为 >= 1 的整数"}, status_code=400)
-    deleted = db.truncate_from_turn(request.path_params["conv_id"], turn)
+    deleted = db.truncate_from_turn(request.path_params["conv_id"], turn, user_id=_uid(request))
     return JSONResponse({"ok": True, "deleted": deleted})
 
 
 # ---- 收藏笔记本 CRUD ----
 
 async def api_list_bookmarks(request):
-    return JSONResponse(db.list_bookmarks())
+    return JSONResponse(db.list_bookmarks(_uid(request)))
 
 
 async def api_add_bookmark(request):
@@ -659,7 +547,7 @@ async def api_add_bookmark(request):
     content = str(body.get("content") or "").strip()
     if not conv_id or turn < 1 or not content:
         return JSONResponse({"ok": False, "msg": "conversation_id / turn / content 无效"}, status_code=400)
-    bm = db.add_bookmark(conv_id, turn, str(body.get("title", ""))[:60], content)
+    bm = db.add_bookmark(conv_id, turn, str(body.get("title", ""))[:60], content, user_id=_uid(request))
     return JSONResponse({"ok": True, "bookmark": bm})
 
 
@@ -670,12 +558,13 @@ async def api_update_bookmark(request):
         note=body.get("note"),
         tags=body.get("tags"),
         title=body.get("title"),
+        user_id=_uid(request),
     )
     return JSONResponse({"ok": ok})
 
 
 async def api_delete_bookmark(request):
-    ok = db.delete_bookmark(request.path_params["bm_id"])
+    ok = db.delete_bookmark(request.path_params["bm_id"], user_id=_uid(request))
     return JSONResponse({"ok": ok})
 
 
@@ -693,6 +582,9 @@ async def api_download_export(request):
     safe = os.path.basename(unquote(request.path_params["filename"]))
     fp = EXPORT_DIR / safe
     if not safe or not fp.is_file():
+        return JSONResponse({"ok": False, "msg": "文件不存在"}, status_code=404)
+    # 归属校验：鉴权开启时仅属主可下载（未记录归属/非本人一律 404，不泄露存在性）
+    if config.AUTH_ENABLED and db.get_export_owner(safe) != _uid(request):
         return JSONResponse({"ok": False, "msg": "文件不存在"}, status_code=404)
     return FileResponse(fp, filename=safe, media_type="text/markdown; charset=utf-8")
 
@@ -715,7 +607,7 @@ routes = [
     Route("/api/exports/{filename}", api_download_export, methods=["GET"]),
     Mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static"),
 ]
-app = Starlette(routes=routes)
+app = AuthMiddleware(Starlette(routes=routes))
 
 
 if __name__ == "__main__":

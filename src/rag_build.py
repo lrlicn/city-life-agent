@@ -10,12 +10,14 @@
 注意：store 连接在这里打开后不关闭，由入口脚本（scripts/main.py）统一 __aexit__。
 """
 import os
+import hashlib
+import time
 
 from agentscope.credential import OpenAICredential
 from agentscope.embedding import OpenAIEmbeddingModel
 from agentscope.rag import ApproxTokenChunker, KnowledgeBase, QdrantStore, TextParser
 
-from src import config
+from src import config, observability
 
 # 知识文档目录（按城市分目录：data/docs/{CITY}/，把待检索的 .md/.txt 放这里）
 DATA_DIR = os.path.join(
@@ -39,12 +41,23 @@ def make_embedding_model() -> OpenAIEmbeddingModel:
     )
 
 
+def _file_hash(path: str) -> str:
+    """文件内容 sha256（取前 16 位）。用于变更检测：内容改了 hash 就变，与旧副本不一致。"""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for blk in iter(lambda: f.read(65536), b""):
+            h.update(blk)
+    return h.hexdigest()[:16]
+
+
 async def build_knowledge_base(rebuild: bool = False) -> tuple[KnowledgeBase, QdrantStore]:
     """读取 data/docs/{CITY}/ 下所有文档，解析切块后入库，返回 (knowledge, store)。
 
-    幂等：默认按文件名跳过集合中已存在的文档，避免每次启动/运行重复入库、累积重复副本。
-    rebuild=True：先删除集合中全部历史文档（含旧版遗留的重复副本）再重新入库，
-                  也用于源文档内容变更后强制刷新。
+    幂等（内容感知）：以向量库为单一事实源，每个文档的 document_metadata 里存了内容 content_hash。
+      - 文件名存在且 hash 一致且无重复副本 → 真·未变更，跳过；
+      - 文件名存在但 hash 变了，或存在历史重复副本 → 删旧再重灌（修复「改了 .md 却仍用旧向量」）；
+      - 文件名不存在 → 新入库。
+    rebuild=True：先删除集合中全部历史文档再全量重灌。
 
     store 的连接已打开，调用方需在 finally 中 await store.__aexit__(...)。
     """
@@ -73,39 +86,53 @@ async def build_knowledge_base(rebuild: bool = False) -> tuple[KnowledgeBase, Qd
         collection="agent-rag-kb",
     )
 
-    # 已入库文档：按文件名归组其 document_id（用于幂等跳过 / 重建清空）
-    existing: dict[str, list[str]] = {}
+    # 已入库文档：按文件名归组其 DocumentSummary（含 metadata，供内容 hash 比对）
+    # 向量库是「哪些文档存在」的唯一事实源；DocumentSummary.metadata 可回读当初写入的 content_hash。
+    existing: dict[str, list] = {}
     for s in await knowledge.list_documents():
-        name = os.path.basename(getattr(s, "source", "") or "")
+        name = os.path.basename(getattr(s, "source", "") or "") or (s.metadata or {}).get("filename") or ""
         if name:
-            existing.setdefault(name, []).append(s.document_id)
+            existing.setdefault(name, []).append(s)
 
     if rebuild and existing:
         removed = 0
-        for doc_ids in existing.values():
-            for doc_id in doc_ids:
-                await knowledge.delete_document(doc_id)
+        for summaries in existing.values():
+            for s in summaries:
+                await knowledge.delete_document(s.document_id)
                 removed += 1
-        print(f"  ↻ 重建：已清空 {removed} 个历史文档（含重复副本）")
+        observability.log_event("rag.rebuild", msg=f"  ↻ 重建：已清空 {removed} 个历史文档（含重复副本）", removed=removed)
         existing.clear()
 
-    # 遍历 data/docs/{CITY}/ 下的 .md/.txt 文件，逐篇入库（每篇一个 document_id）
+    # 遍历 data/docs/{CITY}/ 下的文档，逐篇内容感知入库（每篇一个 document_id）
     total = 0
     for filename in os.listdir(DATA_DIR):
         if not filename.lower().endswith((".md", ".txt", ".csv", ".html")):
             continue
-        if filename in existing:
-            print(f"  ↳ 跳过已入库 {filename}（集合内 {len(existing[filename])} 份）")
-            continue
         path = os.path.join(DATA_DIR, filename)
+        h = _file_hash(path)
+        summaries = existing.get(filename)
+        if summaries:
+            stored = {(s.metadata or {}).get("content_hash") for s in summaries}
+            # 恰好一份且内容未变 → 真·未变更，跳过（避免重复 embedding、省 token）
+            if len(summaries) == 1 and stored == {h}:
+                observability.log_event("rag.skip", msg=f"  ↳ 跳过未变更 {filename}", filename=filename)
+                continue
+            # 内容变更，或存在历史重复副本 → 删旧再重灌
+            for s in summaries:
+                await knowledge.delete_document(s.document_id)
+            observability.log_event(
+                "rag.update",
+                msg=f"  ↻ 更新 {filename}（内容变更/副本清理，删 {len(summaries)} 旧档）",
+                filename=filename, old_copies=len(summaries), changed=(stored != {h}),
+            )
         sections = await parser.parse(file=path, filename=filename)
         chunks = await chunker.chunk(sections)
         doc_id = await knowledge.insert_document(
             chunks,
-            document_metadata={"filename": filename},
+            document_metadata={"filename": filename, "content_hash": h, "indexed_at": int(time.time())},
         )
         total += len(chunks)
-        print(f"  ↳ 已入库 {filename} → {doc_id}（{len(chunks)} chunk）")
-    print(f"解析+切块完成，本次新入库 {total} 个 Chunk")
+        observability.log_event("rag.insert", msg=f"  ↳ 已入库 {filename} → {doc_id}（{len(chunks)} chunk）", filename=filename, doc_id=doc_id, chunks=len(chunks))
+    observability.log_event("rag.build_done", msg=f"解析+切块完成，本次新入库 {total} 个 Chunk", new_chunks=total)
 
     return knowledge, store

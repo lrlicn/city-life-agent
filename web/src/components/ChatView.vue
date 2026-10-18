@@ -13,6 +13,7 @@ import Sidebar from './Sidebar.vue'
 import BookmarksPanel from './BookmarksPanel.vue'
 import ReasoningPanel from './ReasoningPanel.vue'
 import { useSettings } from '../composables/useSettings.js'
+import { authFetch, authHeader, withToken } from '../auth.js'
 
 // 回答模式：brief / standard / report
 const mode = ref('standard')
@@ -49,6 +50,9 @@ function fmt(v) {
 const { messages, sendMessage, status, error, stop } = useChat({
   transport: new DefaultChatTransport({
     api: '/chat-ai',
+    // 携带访问令牌（鉴权开启时）；走 authFetch 使流式请求 401 也能弹令牌门
+    headers: () => authHeader(),
+    fetch: authFetch,
     body: () => ({
       mode: mode.value || null,
       require_approval: requireApproval.value,
@@ -82,7 +86,7 @@ const editInputRef = ref(null)
 
 async function loadConvs() {
   try {
-    const r = await fetch('/api/conversations')
+    const r = await authFetch('/api/conversations')
     conversations.value = await r.json()
   } catch { conversations.value = [] }
 }
@@ -96,7 +100,7 @@ async function newConv() {
 async function selectConv(id) {
   convId.value = id
   localStorage.setItem('convId', id)
-  const r = await fetch(`/api/conversations/${id}/messages`)
+  const r = await authFetch(`/api/conversations/${id}/messages`)
   const msgs = await r.json()
   messages.value = msgs.map(m => ({ id: m.id, role: m.role, parts: m.parts, _durMs: m.duration_ms }))
   // 历史消息：用落库的真实创建时间回填时间戳（否则 m-time 会显示成“加载时刻”）
@@ -105,14 +109,14 @@ async function selectConv(id) {
   }
 }
 async function renameConv({ id, title }) {
-  await fetch(`/api/conversations/${id}`, {
+  await authFetch(`/api/conversations/${id}`, {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title }),
   })
   loadConvs()
 }
 async function deleteConv(id) {
   try {
-    const r = await fetch(`/api/conversations/${id}`, { method: 'DELETE' })
+    const r = await authFetch(`/api/conversations/${id}`, { method: 'DELETE' })
     if (!r.ok) console.error('delete failed:', r.status)
   } catch (e) { console.error('delete error:', e) }
   if (convId.value === id) {
@@ -122,11 +126,18 @@ async function deleteConv(id) {
   }
   await loadConvs()
 }
-onMounted(() => {
-  loadConvs()
+onMounted(async () => {
+  await loadConvs()
   loadBookmarks()
-  // 上次未关闭的会话，自动载入历史
-  if (convId.value) selectConv(convId.value)
+  // 落地策略：上次会话仍属于当前用户且仍在列表里 → 恢复；
+  // 否则若有历史 → 自动打开最近一条；都没有（新用户）→ 保持空欢迎态。
+  if (convId.value && conversations.value.some(c => c.id === convId.value)) {
+    selectConv(convId.value)
+  } else if (conversations.value.length > 0) {
+    selectConv(conversations.value[0].id)
+  } else {
+    convId.value = ''
+  }
 })
 
 // ---- 收藏笔记本 ----
@@ -135,7 +146,7 @@ const bookmarkList = ref([])
 
 async function loadBookmarks() {
   try {
-    const r = await fetch('/api/bookmarks')
+    const r = await authFetch('/api/bookmarks')
     bookmarkList.value = await r.json()
   } catch { bookmarkList.value = [] }
 }
@@ -169,11 +180,11 @@ async function toggleBookmark(m) {
   const existing = bmOf(m)
   try {
     if (existing) {
-      await fetch(`/api/bookmarks/${existing.id}`, { method: 'DELETE' })
+      await authFetch(`/api/bookmarks/${existing.id}`, { method: 'DELETE' })
     } else {
       const content = agentParts(m).filter(x => x.kind === 'text').map(x => x.text).join('\n\n')
       if (!content.trim()) return
-      await fetch('/api/bookmarks', {
+      await authFetch('/api/bookmarks', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ conversation_id: convId.value, turn: info.turn, title: info.q.slice(0, 60), content }),
@@ -220,9 +231,14 @@ const PRESETS = [
   { text: '以上海为基准，北京、广州、成都的生活成本差多少？', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="20" x2="6" y2="12"/><line x1="12" y1="20" x2="12" y2="5"/><line x1="18" y1="20" x2="18" y2="14"/></svg>' },
 ]
 
+// 单次问题长度上限（字符）：镜像后端 config.MAX_INPUT_CHARS。前端先拦给可操作提示，
+// 后端仍会硬拦（input_too_long）作多入口防御；改这里最好同步改 .env 的 MAX_INPUT_CHARS。
+const MAX_INPUT = 2000
+
 function submit(text) {
   const q = (text ?? input.value).trim()
   if (!q) return
+  if (MAX_INPUT && q.length > MAX_INPUT) { showToast(`问题太长了（上限约 ${MAX_INPUT} 字），请精简后再发。`); return }
 
   // 新建会话时，先在侧边栏插入临时会话项，让用户立刻看到标题 + loading
   let tempIdForWatch = ''
@@ -513,7 +529,7 @@ async function resolveInteraction(m, data, opt) {
   if (!isLiveInteraction(m, data)) return
   answeredInteractions[data.id] = opt
   try {
-    await fetch('/api/interact', {
+    await authFetch('/api/interact', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ interaction_id: data.id, value: opt }),
@@ -627,7 +643,7 @@ async function truncateFromMessage(msgId) {
   const turn = turnsMeta.value.find(x => x.id === messages.value[uIdx].id)?.n
   if (convId.value && !convId.value.startsWith('temp-') && turn) {
     try {
-      const r = await fetch(`/api/conversations/${convId.value}/truncate`, {
+      const r = await authFetch(`/api/conversations/${convId.value}/truncate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ turn }),
@@ -1031,7 +1047,7 @@ onBeforeUnmount(() => {
                   <div class="ex-title">{{ p.data.title }}</div>
                   <div class="ex-meta">{{ p.data.format }}<template v-if="p.data.chars"> · {{ p.data.chars }} 字</template> · {{ p.data.filename }}</div>
                 </div>
-                <a class="ex-btn" :href="p.data.url" target="_blank" rel="noopener">
+                <a class="ex-btn" :href="withToken(p.data.url)" target="_blank" rel="noopener">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
                   下载
                 </a>
@@ -1090,7 +1106,7 @@ onBeforeUnmount(() => {
                   <div class="ex-title">{{ p.data.title }}</div>
                   <div class="ex-meta">{{ p.data.format }}<template v-if="p.data.chars"> · {{ p.data.chars }} 字</template> · {{ p.data.filename }}</div>
                 </div>
-                <a class="ex-btn" :href="p.data.url" target="_blank" rel="noopener">
+                <a class="ex-btn" :href="withToken(p.data.url)" target="_blank" rel="noopener">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
                   下载
                 </a>
@@ -1527,8 +1543,11 @@ header h1 {
 .welcome-mode .inputbar {
   position: absolute;
   left: 50%;
-  top: 54%;
-  transform: translate(-50%, -50%);
+  /* 顶部锚定 + 只水平居中：textarea 随长文本增高时向下生长，
+     不再因 translateY(-50%) 向上顶到问候语小标题；
+     top 取 38% ≈ 短输入时输入框原本居中的顶部位置，间距与旧版一致 */
+  top: 38%;
+  transform: translateX(-50%);
   width: min(780px, calc(100% - 48px));
   max-width: none;
   padding: 0;
@@ -1551,6 +1570,9 @@ header h1 {
 }
 .user-row { flex-direction: column; align-items: flex-end; }
 .user-row .msg-meta { position: static; margin-top: 7px; }
+/* 助手行的操作栏/时间戳是绝对定位挂在行下方 30px（bottom:-30px），不占行高；
+   若沿用默认 18px 会被下一轮 user 气泡压住，故给回答行留足下方间距 */
+.agent-row { margin-bottom: 44px; }
 /* 左侧轮次导航条：地铁线路图风格——细轨道串起各轮「站点」，
    active 站点亮色光晕，hover 站点膨胀成显示轮次的胶囊并弹预览 */
 .turn-rail {
@@ -2318,6 +2340,7 @@ header h1 {
   line-height: 1.5;
   min-height: 28px;
   max-height: 160px;
+  overflow-y: auto;
   font-family: inherit;
 }
 .composer textarea::placeholder { color: var(--text-faint); }
